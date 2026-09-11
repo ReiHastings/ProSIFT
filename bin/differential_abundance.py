@@ -9,7 +9,7 @@ Purpose:       Module 04 DIFFERENTIAL_ABUNDANCE process. Parses and validates
                contrasts from params.yml, fits a linear model per protein using
                limma empirical Bayes (trend=TRUE) via rpy2, applies DEqMS
                peptide-count-aware variance correction, and produces a per-protein
-               results table (14 columns), a plain-text summary, and volcano / MA
+               results table (15 columns), a plain-text summary, and volcano / MA
                diagnostic plots (static PNG + interactive HTML) for each contrast.
                Supports optional mean-shift sample quarantine with dual
                (primary/sensitivity) reporting (Section 4.9 of the module spec).
@@ -40,6 +40,7 @@ Usage:
 import argparse
 import datetime
 import logging
+import re
 import sys
 from pathlib import Path
 
@@ -188,16 +189,71 @@ def build_group_map(metadata_df: pd.DataFrame, params: dict) -> dict[str, str]:
 # CONTRAST PARSING AND VALIDATION
 # ============================================================
 
+# R reserved words. make.names() appends a dot to each of these, so a design-
+# matrix column literally named one of them is non-syntactic and makeContrasts()
+# rejects it.
+_R_RESERVED_WORDS = frozenset({
+    "if", "else", "repeat", "while", "function", "for", "in", "next", "break",
+    "TRUE", "FALSE", "NULL", "Inf", "NaN", "NA",
+    "NA_integer_", "NA_real_", "NA_complex_", "NA_character_",
+})
+
+# A syntactically valid R name: letters, digits, '.', '_'; starts with a letter,
+# or with a dot that is NOT followed by a digit. This mirrors 'make.names(x) == x',
+# which is exactly the validity check limma's makeContrasts() applies to every
+# design-matrix column name.
+#
+# DELIBERATELY ASCII-ONLY -- do not 'fix' this to a Unicode letter class.
+# R's make.names() defines 'letter' by the locale of the running R session, so
+# whether a label like 'cafe' with an accent is a valid R name depends on where
+# the fit runs (UTF-8 locale: accepted; C/POSIX locale: rejected). ASCII-only is
+# over-strict in a UTF-8 locale and exactly right in a C locale, so it fails safe
+# in both: worst case a clear Python error telling you to rename a group. A
+# Unicode-permissive class would instead fail UNSAFE in a C locale -- passing
+# here and then dying inside makeContrasts() on the cluster, which is the exact
+# failure this guard exists to prevent, and which would reproduce in only one of
+# the two environments. If non-ASCII group labels are ever genuinely needed, the
+# correct fix is not a better regex but an rpy2 round-trip that asks the R
+# session itself whether make.names(x) == x.
+_R_SYNTACTIC_NAME = re.compile(r"^(?:[A-Za-z]|\.(?![0-9]))[A-Za-z0-9._]*$")
+
+
+def is_syntactic_r_name(name: str) -> bool:
+    """
+    Return True iff `name` is a syntactically valid R name (equivalently,
+    make.names(name) == name in R).
+
+    Group labels must satisfy this because the R fit assigns each label as a
+    design-matrix column name, and limma's makeContrasts() errors on any
+    non-syntactic level name. That check runs over the FULL levels vector (every
+    group with samples in the run), not only the two groups named in a given
+    contrast, so every such label is validated, not just the contrasted ones.
+
+    ASCII-only by design; see the note on _R_SYNTACTIC_NAME above.
+    """
+    return bool(_R_SYNTACTIC_NAME.match(name)) and name not in _R_RESERVED_WORDS
+
+
 def parse_and_validate_contrasts(
     params: dict,
-    metadata_df: pd.DataFrame,
+    available_groups: list[str],
 ) -> list[tuple[str, str, str, str]]:
     """
     Parse and validate contrast strings from params.yml design.contrasts.
 
     Each contrast string must use the 'numerator_vs_denominator' format
-    (split on first occurrence of '_vs_'). Both group names must match
-    values found in the group_column of the metadata.
+    (split on first occurrence of '_vs_'). Both group names must be present in
+    `available_groups`.
+
+    `available_groups` MUST be the groups whose samples are actually present in
+    the abundance matrix (main()'s `unique_groups`), NOT every value in the
+    metadata group column. That list is what becomes the R factor's levels
+    vector and hence the design-matrix column names, so it is exactly the set R
+    validates and exactly the set a contrast can legally name. Passing the wider
+    metadata column instead has two failure modes: a non-syntactic group with no
+    samples in the run is rejected although R would never see it, and a contrast
+    naming a metadata-only group passes here and then dies in makeContrasts() on
+    an undefined variable.
 
     Returns a list of 4-tuples:
         (contrast_user, numerator, denominator, r_contrast_str)
@@ -206,9 +262,25 @@ def parse_and_validate_contrasts(
     Raises ValueError with a specific message on any validation failure.
     """
     group_col = params["design"]["group_column"]
-    available_groups = sorted(
-        metadata_df[group_col].dropna().astype(str).unique()
-    )
+    available_groups = sorted(set(available_groups))
+
+    # --- Validate group labels are valid R names ---
+    # Every group label becomes a design-matrix column name in the R fit, and
+    # limma's makeContrasts() rejects any non-syntactic level name, checking the
+    # ENTIRE levels vector (not only the two groups named in a contrast). A label
+    # like 'WT-A' or '5xFAD' would otherwise abort the fit with a cryptic R error.
+    # Validate all groups up front against 'make.names(x) == x' and fail clearly.
+    bad_groups = [g for g in available_groups if not is_syntactic_r_name(g)]
+    if bad_groups:
+        raise ValueError(
+            f"Group label(s) {bad_groups} in metadata column '{group_col}' are "
+            "not valid R names and would break the differential-abundance model "
+            "(group labels become design-matrix column names). Use only ASCII "
+            "letters, digits, '.', and '_', start with a letter, and avoid R "
+            "reserved words (e.g. 'TRUE', 'NA'). Note that accented and "
+            "non-Latin letters are rejected deliberately, even though R may "
+            "accept them in some locales. Rename the groups before running."
+        )
 
     raw_contrasts = params.get("design", {}).get("contrasts", [])
     if not raw_contrasts:
@@ -236,12 +308,16 @@ def parse_and_validate_contrasts(
                 "splitting on '_vs_'."
             )
 
+        # Membership is checked against the samples-present groups, so a group
+        # that exists in the metadata but contributes no samples to this run is
+        # correctly rejected here rather than in R (it has no design-matrix
+        # column, so makeContrasts() would fail on an undefined variable).
         for name, role in [(numerator, "numerator"), (denominator, "denominator")]:
             if name not in available_groups:
                 raise ValueError(
                     f"Contrast '{contrast_user}': {role} group '{name}' not found "
-                    f"in metadata column '{group_col}'. "
-                    f"Available groups: {available_groups}"
+                    f"among the groups with samples in this run (metadata column "
+                    f"'{group_col}'). Available groups: {available_groups}"
                 )
 
         r_contrast_str = f"{numerator} - {denominator}"
@@ -612,11 +688,11 @@ def assemble_results(
     Map R column names to the ProSIFT output schema, add gene_symbol,
     compute significance and direction, and attach the contrast label.
 
-    Output schema (14 columns):
+    Output schema (15 columns):
         protein_id, gene_symbol, log2_fc, avg_abundance,
         limma_t, limma_pvalue, limma_adj_pvalue,
         deqms_t, deqms_pvalue, deqms_adj_pvalue,
-        n_peptides, significant, direction, contrast
+        n_peptides, significant, pvalue_undetermined, direction, contrast
     """
     da_cfg      = params.get("differential_abundance", {})
     sig_cfg     = da_cfg.get("significance", {})
@@ -684,6 +760,21 @@ def assemble_results(
     adj_pval = out[primary_adj_pval].astype(float)
     fc       = out["log2_fc"].astype(float)
 
+    # A NaN primary adjusted p-value is undefined, not non-significant. 'NaN < t'
+    # evaluates to False, so such a protein would silently fold into the 'ns'
+    # class. Surface it in a dedicated boolean column (plus a logged count) so it
+    # is never mistaken for a genuine non-significant call; `direction` stays in
+    # {up, down, ns} and its contract is unchanged.
+    pvalue_undetermined = adj_pval.isna()
+    n_undetermined = int(pvalue_undetermined.sum())
+    if n_undetermined > 0:
+        logging.warning(
+            "%d protein(s) have a NaN %s; flagged pvalue_undetermined=True and "
+            "excluded from the significant set (direction stays 'ns').",
+            n_undetermined, primary_adj_pval,
+        )
+    out["pvalue_undetermined"] = pvalue_undetermined
+
     passes_fdr = adj_pval < fdr_thresh
     passes_fc  = (fc.abs() > fc_thresh) if fc_thresh > 0 else pd.Series(True, index=out.index)
     out["significant"] = passes_fdr & passes_fc
@@ -706,7 +797,7 @@ def assemble_results(
         "limma_t", "limma_pvalue", "limma_adj_pvalue",
         "deqms_t", "deqms_pvalue", "deqms_adj_pvalue",
         "n_peptides",
-        "significant", "direction", "contrast",
+        "significant", "pvalue_undetermined", "direction", "contrast",
     ]
     out = out[col_order]
 
@@ -777,6 +868,10 @@ def write_summary_txt(
         n_up   = int((df["direction"] == "up").sum())
         n_down = int((df["direction"] == "down").sum())
         n_ns   = n_proteins - n_sig
+        n_undet = (
+            int(df["pvalue_undetermined"].sum())
+            if "pvalue_undetermined" in df.columns else 0
+        )
 
         pct_sig  = f"{100 * n_sig / n_proteins:.1f}" if n_proteins > 0 else "0.0"
         pct_up   = f"{100 * n_up / n_proteins:.1f}"  if n_proteins > 0 else "0.0"
@@ -824,6 +919,7 @@ def write_summary_txt(
             f"  Up-regulated:           {n_up} ({pct_up}%)",
             f"  Down-regulated:         {n_down} ({pct_down}%)",
             f"Not significant:          {n_ns}",
+            f"  p-value undetermined:   {n_undet} (NaN adjusted p-value; not significant)",
             "",
         ]
 
@@ -862,11 +958,16 @@ def write_summary_txt(
             n_sig  = int(df["significant"].sum())
             n_up   = int((df["direction"] == "up").sum())
             n_down = int((df["direction"] == "down").sum())
+            n_undet = (
+                int(df["pvalue_undetermined"].sum())
+                if "pvalue_undetermined" in df.columns else 0
+            )
             pct    = f"{100 * n_sig / n_proteins:.1f}" if n_proteins > 0 else "0.0"
+            undet_note = f"  ({n_undet} p-value undetermined)" if n_undet else ""
             lines += [
                 f"CONTRAST: {contrast_user}  ({numerator} - {denominator})",
                 f"  Significant proteins:   {n_sig} / {n_proteins} ({pct}%)  "
-                f"[{n_up} up, {n_down} down]",
+                f"[{n_up} up, {n_down} down]{undet_note}",
                 "",
             ]
 
@@ -1082,7 +1183,10 @@ def main() -> None:
     logging.info(f"  Groups: {unique_groups}")
 
     # --- Validate contrasts ---
-    contrasts = parse_and_validate_contrasts(params, metadata_df)
+    # Validate against `unique_groups` (groups with samples in this run), not the
+    # full metadata column: `unique_groups` is what is handed to R as the factor
+    # levels / design-matrix column names, so it is exactly the set R validates.
+    contrasts = parse_and_validate_contrasts(params, unique_groups)
     logging.info(f"  Contrasts: {[c[0] for c in contrasts]}")
 
     # --- Determine method and peptide count availability ---

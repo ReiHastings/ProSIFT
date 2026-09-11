@@ -76,6 +76,16 @@ def _metadata():
     })
 
 
+def _groups():
+    '''
+    The samples-present group labels for _metadata(), i.e. what main() passes to
+    parse_and_validate_contrasts as `unique_groups`. Kept as a plain list because
+    that is the real argument type: the validator sees the R factor levels, not
+    the metadata frame.
+    '''
+    return ['KO', 'WT']
+
+
 def _params(contrasts, fdr=0.05, fc=1.0):
     return {
         'design': {'group_column': 'genotype', 'contrasts': contrasts},
@@ -91,30 +101,30 @@ def _params(contrasts, fdr=0.05, fc=1.0):
 class TestParseContrasts:
 
     def test_valid_contrast_parsed(self):
-        parsed = parse_and_validate_contrasts(_params(['KO_vs_WT']), _metadata())
+        parsed = parse_and_validate_contrasts(_params(['KO_vs_WT']), _groups())
         assert parsed == [('KO_vs_WT', 'KO', 'WT', 'KO - WT')]
 
     def test_multiple_contrasts(self):
         parsed = parse_and_validate_contrasts(
-            _params(['KO_vs_WT', 'WT_vs_KO']), _metadata())
+            _params(['KO_vs_WT', 'WT_vs_KO']), _groups())
         assert len(parsed) == 2
         assert parsed[1] == ('WT_vs_KO', 'WT', 'KO', 'WT - KO')
 
     def test_missing_delimiter_raises(self):
         with pytest.raises(ValueError, match="_vs_"):
-            parse_and_validate_contrasts(_params(['KOWT']), _metadata())
+            parse_and_validate_contrasts(_params(['KOWT']), _groups())
 
     def test_empty_denominator_raises(self):
         with pytest.raises(ValueError, match='denominator is empty'):
-            parse_and_validate_contrasts(_params(['KO_vs_']), _metadata())
+            parse_and_validate_contrasts(_params(['KO_vs_']), _groups())
 
     def test_unknown_group_raises(self):
         with pytest.raises(ValueError, match='not found'):
-            parse_and_validate_contrasts(_params(['KO_vs_XX']), _metadata())
+            parse_and_validate_contrasts(_params(['KO_vs_XX']), _groups())
 
     def test_no_contrasts_raises(self):
         with pytest.raises(ValueError, match='No contrasts defined'):
-            parse_and_validate_contrasts(_params([]), _metadata())
+            parse_and_validate_contrasts(_params([]), _groups())
 
 
 # ============================================================
@@ -197,7 +207,8 @@ class TestAssembleResults:
             'protein_id', 'gene_symbol', 'log2_fc', 'avg_abundance',
             'limma_t', 'limma_pvalue', 'limma_adj_pvalue',
             'deqms_t', 'deqms_pvalue', 'deqms_adj_pvalue',
-            'n_peptides', 'significant', 'direction', 'contrast',
+            'n_peptides', 'significant', 'pvalue_undetermined',
+            'direction', 'contrast',
         ]
         assert (out['contrast'] == 'KO_vs_WT').all()
         assert out.set_index('protein_id').loc['P1', 'n_peptides'] == 3
