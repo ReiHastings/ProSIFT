@@ -54,15 +54,37 @@ workflow PROSIFT {
     //   prenorm_params    -> PRENORM_QC (joined after detection filter)
     //   normalize_params  -> NORMALIZE (joined after QC)
     //   impute_params     -> IMPUTE (joined after NORMALIZE)
+    // Path resolution: entries in the samplesheet may be absolute or relative.
+    // Relative entries resolve against the SAMPLESHEET's own directory, not the
+    // launch directory. This is what nf-core users expect, it lets a samplesheet
+    // travel with its data (so the shipped example under assets/examples works
+    // from any launch directory), and it removes the need for machine-specific
+    // absolute paths that break the moment the inputs move or are rsynced to the
+    // cluster.
+    def sheet_dir = file(params.samplesheet).toAbsolutePath().parent
+
+    def resolve_input = { String raw, String field, String run_id ->
+        if( !raw?.trim() )
+            error "Samplesheet row '${run_id}' has an empty '${field}' column."
+        def p = raw.trim()
+        // file() on an absolute path returns it unchanged; a relative path is
+        // rebased onto the samplesheet directory before existence checking.
+        def resolved = p.startsWith('/') ? file(p) : file(sheet_dir.resolve(p))
+        if( !resolved.exists() )
+            error "Samplesheet row '${run_id}': '${field}' not found at ${resolved}\n" +
+                  "  (samplesheet value: '${p}'; relative paths resolve against ${sheet_dir})"
+        return resolved
+    }
+
     Channel
         .fromPath(params.samplesheet, checkIfExists: true)
         .splitCsv(header: true)
         .map { row ->
             def meta = [run_id: row.run_id]
             [ meta,
-              file(row.abundance, checkIfExists: true),
-              file(row.metadata,  checkIfExists: true),
-              file(row.params,    checkIfExists: true) ]
+              resolve_input(row.abundance, 'abundance', row.run_id),
+              resolve_input(row.metadata,  'metadata',  row.run_id),
+              resolve_input(row.params,    'params',    row.run_id) ]
         }
         .multiMap { meta, abund, meta_csv, params_yml ->
             // validate branch: all four inputs for VALIDATE_INPUTS
