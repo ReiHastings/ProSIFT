@@ -1,5 +1,6 @@
 # Data (user-specific)
 data/
+benchmark_datasets/
 results/
 results_cluster/
 results_mod1to5/
@@ -53,6 +54,7 @@ htmlcov/
 # Claude Code local config
 .claude/
 CLAUDE.md
+claude-workflow-README.md
 
 # Project documentation (private)
 project_documentation/
