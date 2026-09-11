@@ -1,0 +1,55 @@
+# ProSIFT vendor mapping -- DIA-NN
+# Source file: report.pg_matrix.tsv  (plus report.pr_matrix.tsv for peptide counts)
+# Verified against: PXD028735 example from the einprot R package (real DIA-NN output).
+# https://github.com/fmicompbio/einprot/tree/main/inst/extdata/diann_example
+
+vendor: diann
+source_file: 'report.pg_matrix.tsv'
+separator: "\t"
+
+# --- Leading annotation columns, in file order ---
+annotation_columns:
+  - Protein.Group
+  - Protein.Ids
+  - Protein.Names
+  - Genes
+  - First.Protein.Description
+
+# --- Mapping to ProSIFT ---
+protein_id:
+  from: 'Protein.Group'
+  # WARNING: Protein.Group and Protein.Ids contain the SAME accessions in a
+  # DIFFERENT order (e.g. 'A0A024R1R8;Q9Y2S6' vs 'Q9Y2S6;A0A024R1R8').
+  # ProSIFT keeps the first semicolon-delimited token as the representative
+  # accession, so the column you map from changes which protein you get.
+  # Map from Protein.Group for consistency with DIA-NN's own grouping.
+  note: 'semicolon-delimited; ProSIFT keeps the first token'
+
+abundance:
+  # Every remaining column is one run. Headers are the FULL PATH to the source
+  # file as seen by the machine that ran DIA-NN, e.g.
+  #   /scratch/cpanse/PXD028735/dia/LFQ_Orbitrap_AIF_Condition_A_Sample_Beta_01.mzML
+  # These MUST be renamed to clean sample IDs by hand. They are not stable
+  # across reprocessing and they contain '/' and '.' characters.
+  from: 'all columns after First.Protein.Description'
+  rename_required: true
+  target_prefix: 'abundance_'
+
+abundance_type: 'raw'
+# pg_matrix holds PG.MaxLFQ quantities: normalised but still on the intensity
+# scale, not log2. Declare as 'raw' unless you log-transform yourself.
+# DIA-NN omits zero quantities from the matrices, so blanks are missing values.
+
+peptide_count:
+  available: false
+  # pg_matrix.tsv has NO peptide or precursor count columns. Derive them from
+  # report.pr_matrix.tsv, which has one row per precursor plus a Protein.Group
+  # column: count non-empty quantities per (Protein.Group, run).
+  # See peptide_counts.md in this directory for a working snippet.
+  derive_from: 'report.pr_matrix.tsv'
+  target_prefix: 'peptide_count_'
+
+rows_to_drop: []
+# DIA-NN matrices are already FDR-filtered (1% global protein-group q-value,
+# plus a 5% run-specific protein-level filter), so there is no contaminant or
+# decoy flag column to filter on the way MaxQuant has.

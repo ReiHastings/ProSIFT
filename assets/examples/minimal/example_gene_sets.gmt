@@ -1,0 +1,4 @@
+EXAMPLE_SYNAPTIC_VESICLE_CYCLE	ProSIFT synthetic example gene set	Snap25	Syn1	Syt1	Stx1a	Vamp2	Sypl1	Dlg4	Nrxn1	Nlgn2	Cplx1	Rab3a	Syngap1
+EXAMPLE_MITOCHONDRIAL_RESPIRATION	ProSIFT synthetic example gene set	Ndufa9	Sdha	Uqcrc1	Cox4i1	Atp5f1a	Cs	Idh3a	Mdh2	Aco2	Slc25a4
+EXAMPLE_ASTROCYTE_MARKERS	ProSIFT synthetic example gene set	Gfap	Aqp4	Slc1a2	Slc1a3	S100b	Aldh1l1	Vim	Sox9
+EXAMPLE_CYTOSKELETON_AND_GLYCOLYSIS	ProSIFT synthetic example gene set	Actb	Tubb3	Map2	Nefl	Nefm	Sptbn1	Ank2	Camk2a	Gapdh	Eno2

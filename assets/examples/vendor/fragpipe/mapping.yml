@@ -1,0 +1,39 @@
+# ProSIFT vendor mapping -- FragPipe / MSFragger
+# Source file: combined_protein.tsv
+#
+# STATUS: UNVERIFIED. Derived from the FragPipe output documentation
+# (https://fragpipe.nesvilab.org/docs/tutorial_fragpipe_outputs.html), NOT from
+# a real output file, unlike the DIA-NN and MaxQuant mappings in this directory.
+# Confirm the column names against your own combined_protein.tsv before relying
+# on this. Column names also vary between FragPipe versions.
+
+vendor: fragpipe
+source_file: 'combined_protein.tsv'
+separator: "\t"
+
+protein_id:
+  from: 'Protein ID'
+  # 'Protein' is the full FASTA header string; 'Protein ID' is the bare
+  # accession and is what you want. 'Entry Name' is the UniProt mnemonic
+  # (e.g. TMA7_HUMAN), not an accession.
+
+abundance:
+  from: '<experiment> MaxLFQ Intensity'
+  alternative: '<experiment> Intensity'
+  target_prefix: 'abundance_'
+
+abundance_type: 'raw'
+
+peptide_count:
+  available: 'per-sample spectral counts only'
+  from: '<experiment> Total Spectral Count'
+  # IMPORTANT: FragPipe reports PEPTIDE counts only globally
+  # ('Combined Total Peptides'), not per sample. The per-sample count columns
+  # are SPECTRAL counts. DEqMS accepts a PSM/spectral count as the variance
+  # covariate, so this is a valid input, but it is a different quantity than the
+  # peptide counts used for the MaxQuant mapping. State which you used.
+  target_prefix: 'peptide_count_'
+
+rows_to_drop: []
+# combined_protein.tsv is already filtered by Philosopher. Check whether your
+# workflow retained contaminant entries and drop them if so.

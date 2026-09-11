@@ -1,0 +1,55 @@
+# ProSIFT vendor mapping -- MaxQuant
+# Source file: proteinGroups.txt
+# Verified against: statOmics CPTAC lab3 proteinGroups.txt (real MaxQuant output).
+# https://raw.githubusercontent.com/statOmics/pda/data/quantification/cptacAvsB_lab3/proteinGroups.txt
+
+vendor: maxquant
+source_file: 'proteinGroups.txt'
+separator: "\t"
+
+protein_id:
+  from: 'Majority protein IDs'
+  # 'Protein IDs' lists every accession matching any peptide; 'Majority protein
+  # IDs' lists those with >= half the peptides and is the better representative.
+  # Both are semicolon-delimited; ProSIFT keeps the first token.
+  alternative: 'Protein IDs'
+
+abundance:
+  from: 'LFQ intensity <sample>'
+  # Prefer LFQ intensity over plain 'Intensity' for label-free comparisons.
+  # Note the bare 'Intensity' and 'LFQ intensity' columns (no sample suffix) are
+  # study-wide totals, NOT a sample. Do not map them.
+  target_prefix: 'abundance_'
+
+abundance_type: 'raw'
+# MaxQuant writes 0 for not-detected, not blank. ProSIFT converts values <= 0 to
+# NaN when abundance_type is 'raw', which is the behaviour you want here.
+
+peptide_count:
+  available: true
+  from: 'Razor + unique peptides <sample>'
+  # Per-sample peptide count columns DO exist and map directly. Confirmed in the
+  # reference file: 'Razor + unique peptides 6A_7', etc.
+  # Do not use 'Peptide counts (razor+unique)' -- that is a single
+  # semicolon-delimited column describing the group, not a per-sample count.
+  target_prefix: 'peptide_count_'
+
+# --- Rows that MUST be dropped before ProSIFT sees them ---
+rows_to_drop:
+  - column: 'Reverse'
+    when: '+'
+    why: 'decoy database hit'
+  - column: 'Potential contaminant'
+    when: '+'
+    why: 'common contaminant (keratin, trypsin, serum albumin)'
+  - column: 'Only identified by site'
+    when: '+'
+    why: 'identified only by a modification site; no reliable quantification'
+# The very first data row of the reference file is a CON__ contaminant, so this
+# is not a theoretical concern. Accessions are also prefixed CON__ and REV__.
+
+gene_symbol:
+  from: 'Gene names'
+  optional: true
+  # Not always present. The reference CPTAC export has no 'Gene names' column at
+  # all, only 'Fasta headers'. Exports vary by MaxQuant version and configuration.
