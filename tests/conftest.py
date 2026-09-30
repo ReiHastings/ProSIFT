@@ -4,7 +4,7 @@
 # author: Reina Hastings
 # contact: reinahastings13@gmail.com
 # date created: 2026-04-24
-# last modified: 2026-04-24
+# last modified: 2026-09-30
 #
 # purpose:
 #   Shared pytest fixtures for the ProSIFT test suite. Fixtures defined here
@@ -18,6 +18,13 @@
 #   Sample IDs follow the CTXcyto benchmark convention so tests read against
 #   familiar labels. Random values are seeded for determinism.
 #
+#   Interpreter guard (pytest_configure): the suite refuses to run unless the
+#   Python major.minor matches the pin in environment.yml (the `prosift` conda
+#   env, i.e. the pipeline runtime). Python 3.14 defers annotation evaluation,
+#   so a missing typing import passes there and crashes in the 3.12 pipeline
+#   (seen 2026-09-30 in bin/enrichment.py). Set PROSIFT_ALLOW_ANY_PYTHON=1 to
+#   bypass for a deliberate cross-version run.
+#
 # inputs:
 #   None (fixtures build inputs in-memory)
 #
@@ -25,12 +32,20 @@
 #   None (provides fixture objects to the test runner)
 #
 # usage example:
+#   # Run the suite with the prosift env's interpreter:
+#   "$(conda info --base)/envs/prosift/bin/python" -m pytest tests -q
+#   # (`conda run -n prosift python` is NOT reliable here: on the dev Mac it
+#   #  resolved to another env's Python 3.14; the guard below caught it.)
+#
 #   # In any test file under tests/:
 #   def test_my_function(synthetic_filtered_matrix, synthetic_metadata,
 #                        minimal_params):
 #       # fixtures are already built; go straight to the test
 #       ...
 
+import os
+import re
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -56,6 +71,38 @@ _GROUPS = ['WT', 'WT', 'WT', 'KO', 'KO', 'KO']
 # Protein count for synthetic fixtures. Small enough to keep tests fast and
 # readable; large enough that statistical summaries are meaningful.
 _N_PROTEINS = 20
+
+
+# ============================================================
+# Section 0: Interpreter guard (pipeline runtime version)
+# ============================================================
+
+def _pinned_python(env_yml: Path) -> tuple[int, int]:
+    '''Return the (major, minor) pinned as `python=X.Y` in environment.yml.'''
+    match = re.search(r'^\s*-\s*python\s*=\s*(\d+)\.(\d+)\b',
+                      env_yml.read_text(), re.MULTILINE)
+    if match is None:
+        raise pytest.UsageError(f'No `- python=X.Y` pin found in {env_yml}.')
+    return int(match.group(1)), int(match.group(2))
+
+
+def pytest_configure(config):
+    '''
+    Stop the run before collection when pytest is not running under the
+    pipeline's pinned Python. Exit status 4 (usage error), with the fix.
+    '''
+    if os.environ.get('PROSIFT_ALLOW_ANY_PYTHON') == '1':
+        return
+    pinned  = _pinned_python(PROJECT_ROOT / 'environment.yml')
+    running = sys.version_info[:2]
+    if running != pinned:
+        raise pytest.UsageError(
+            f'ProSIFT tests must run on Python {pinned[0]}.{pinned[1]} (environment.yml, '
+            f'the pipeline runtime), but this is Python {running[0]}.{running[1]} '
+            f'at {sys.executable}.\n'
+            f'  Run: "$(conda info --base)/envs/prosift/bin/python" -m pytest tests -q\n'
+            f'  (Deliberate cross-version run: PROSIFT_ALLOW_ANY_PYTHON=1.)'
+        )
 
 
 # ============================================================
