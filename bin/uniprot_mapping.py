@@ -39,9 +39,8 @@ import os
 import re
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from io import StringIO
-from typing import Optional
 
 try:
     import pandas as pd
@@ -177,7 +176,7 @@ def parse_args() -> argparse.Namespace:
 
 def load_params(params_path: str) -> dict:
     '''Load and return the ProSIFT params YAML.'''
-    with open(params_path, 'r', encoding='utf-8') as f:
+    with open(params_path, encoding='utf-8') as f:
         return yaml.safe_load(f)
 
 
@@ -207,7 +206,7 @@ def compute_cache_key(protein_ids: list[str], organism: str) -> str:
     return hashlib.md5(payload.encode('utf-8')).hexdigest()
 
 
-def load_cache(cachedir: str, cache_key: str, cache_days: int) -> Optional[pd.DataFrame]:
+def load_cache(cachedir: str, cache_key: str, cache_days: int) -> pd.DataFrame | None:
     '''
     Return cached DataFrame if valid: exists, not expired, and schema version
     matches CURRENT_SCHEMA_VERSION. Returns None on any failure condition so
@@ -216,7 +215,7 @@ def load_cache(cachedir: str, cache_key: str, cache_days: int) -> Optional[pd.Da
     parquet_path, meta_path = _cache_paths(cachedir, cache_key)
     if not os.path.isfile(parquet_path) or not os.path.isfile(meta_path):
         return None
-    with open(meta_path, 'r') as f:
+    with open(meta_path) as f:
         meta = json.load(f)
     # Schema version check: caches from before ortholog mapping (version 1 or
     # missing) must be regenerated so the ortholog columns are populated.
@@ -226,7 +225,7 @@ def load_cache(cachedir: str, cache_key: str, cache_days: int) -> Optional[pd.Da
               f'(cached: {cached_version}, current: {CURRENT_SCHEMA_VERSION}). '
               f'Regenerating.')
         return None
-    age_days = (datetime.now(timezone.utc).timestamp() - meta['timestamp']) / 86400
+    age_days = (datetime.now(UTC).timestamp() - meta['timestamp']) / 86400
     if age_days > cache_days:
         print(f'  Cache expired ({age_days:.1f} days old, limit {cache_days} days).')
         return None
@@ -240,7 +239,7 @@ def save_cache(cachedir: str, cache_key: str, df: pd.DataFrame) -> None:
     parquet_path, meta_path = _cache_paths(cachedir, cache_key)
     df.to_parquet(parquet_path, index=False)
     meta = {
-        'timestamp': datetime.now(timezone.utc).timestamp(),
+        'timestamp': datetime.now(UTC).timestamp(),
         'n_proteins': len(df),
         'cache_key': cache_key,
         'schema_version': CURRENT_SCHEMA_VERSION,
@@ -308,7 +307,7 @@ def _fetch_all_results(results_url: str) -> list[dict]:
     Link: <url>; rel="next" header.
     '''
     all_results: list[dict] = []
-    next_url: Optional[str] = results_url
+    next_url: str | None = results_url
     page = 0
 
     while next_url:
@@ -329,7 +328,7 @@ def _fetch_all_results(results_url: str) -> list[dict]:
     return all_results
 
 
-def _parse_next_link(link_header: str) -> Optional[str]:
+def _parse_next_link(link_header: str) -> str | None:
     '''Extract the "next" URL from a Link header, or None.'''
     # Format: <https://...>; rel="next"
     for part in link_header.split(','):
@@ -349,8 +348,8 @@ def query_uniprot(ids: list[str]) -> list[dict]:
     results, and return a flat list of raw result dicts.
     Retries the full sequence up to 3 times on network errors.
     '''
-    last_exc: Optional[Exception] = None
-    for attempt, delay in enumerate([0] + RETRY_DELAYS):
+    last_exc: Exception | None = None
+    for attempt, delay in enumerate([0, *RETRY_DELAYS]):
         if delay:
             print(f'  Retrying in {delay}s (attempt {attempt + 1})...')
             time.sleep(delay)
@@ -384,7 +383,7 @@ def _canonical(accession: str) -> str:
     return m.group(1) if m else accession
 
 
-def _extract_fields(to_entry: dict) -> tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
+def _extract_fields(to_entry: dict) -> tuple[str | None, str | None, str | None, str | None]:
     '''
     Extract (canonical_accession, gene_symbol, entrez_id, ensembl_gene)
     from a UniProt KB entry JSON object (the "to" field in API results).
@@ -398,14 +397,14 @@ def _extract_fields(to_entry: dict) -> tuple[Optional[str], Optional[str], Optio
 
     # Gene symbol
     genes = to_entry.get('genes', [])
-    gene_symbol: Optional[str] = None
+    gene_symbol: str | None = None
     if genes:
         gene_name = genes[0].get('geneName', {})
         gene_symbol = gene_name.get('value') or None
 
     # Entrez ID and Ensembl gene from cross-references
-    entrez_id:    Optional[str] = None
-    ensembl_gene: Optional[str] = None
+    entrez_id:    str | None = None
+    ensembl_gene: str | None = None
     for xref in to_entry.get('uniProtKBCrossReferences', []):
         db = xref.get('database', '')
         if db == 'GeneID' and entrez_id is None:
@@ -541,8 +540,8 @@ def _biomart_post(xml: str) -> pd.DataFrame:
     Retry attempts cycle through BIOMART_MIRRORS in round-robin order so a
     persistent outage on the primary server falls over to the next mirror.
     '''
-    last_exc: Optional[Exception] = None
-    for attempt, delay in enumerate([0] + BIOMART_RETRY_DELAYS):
+    last_exc: Exception | None = None
+    for attempt, delay in enumerate([0, *BIOMART_RETRY_DELAYS]):
         if delay:
             mirror = BIOMART_MIRRORS[attempt % len(BIOMART_MIRRORS)]
             print(f'  BioMart: retrying in {delay}s on {mirror} '
@@ -694,7 +693,7 @@ def _query_orthologs_by_symbol(
     return pd.concat(all_chunks, ignore_index=True), failed_symbols
 
 
-def _query_human_entrez(human_ensembl_ids: list[str]) -> dict[str, Optional[str]]:
+def _query_human_entrez(human_ensembl_ids: list[str]) -> dict[str, str | None]:
     '''
     Query BioMart hsapiens_gene_ensembl to map human Ensembl gene IDs to NCBI
     Entrez gene IDs. Returns dict: human_ensembl_id -> entrez_id (str) or None.
@@ -746,7 +745,7 @@ def _query_human_entrez(human_ensembl_ids: list[str]) -> dict[str, Optional[str]
 
     df = pd.concat(all_chunks, ignore_index=True)
 
-    result: dict[str, Optional[str]] = {}
+    result: dict[str, str | None] = {}
     for _, row in df.iterrows():
         eid = row['human_ensembl_gene']
         if pd.isna(eid):
@@ -767,7 +766,7 @@ def _query_human_entrez(human_ensembl_ids: list[str]) -> dict[str, Optional[str]
 
 def _resolve_orthologs(
     ortholog_df: pd.DataFrame,
-    entrez_map: dict[str, Optional[str]],
+    entrez_map: dict[str, str | None],
     join_key: str,
 ) -> dict[str, dict]:
     '''
@@ -1178,7 +1177,9 @@ def write_report(
             '  This typically indicates the search database FASTA was built from an',
             '  older UniProt release.',
             '',
-        ] + redirect_lines + ['']
+            *redirect_lines,
+            '',
+        ]
 
     if n_multi > 0:
         multi_ids = df.loc[

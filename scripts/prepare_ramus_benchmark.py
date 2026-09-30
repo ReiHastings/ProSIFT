@@ -471,7 +471,7 @@ def main() -> None:
     outdir: Path = args.outdir
     outdir.mkdir(parents=True, exist_ok=True)
 
-    print(f'ProSIFT input preparation -- Ramus UPS1 benchmark')
+    print('ProSIFT input preparation -- Ramus UPS1 benchmark')
     print(f'  Abundance metric: {intensity_prefix.strip()}')
 
     # --- 1. Read and filter ---

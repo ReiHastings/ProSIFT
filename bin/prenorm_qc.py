@@ -49,7 +49,6 @@ import plotly.graph_objects as go
 import scipy.stats
 import yaml
 from plotly.subplots import make_subplots
-
 from prosift_plot_utils import (
     compute_and_plot_correlation,
     compute_and_plot_pca,
@@ -192,7 +191,7 @@ def build_group_map(metadata_df: pd.DataFrame, params: dict) -> dict[str, str]:
     if group_column not in metadata_df.columns:
         raise ValueError(f"Group column '{group_column}' not found in metadata.")
     return dict(zip(metadata_df["sample_id"].astype(str),
-                    metadata_df[group_column].astype(str)))
+                    metadata_df[group_column].astype(str), strict=True))
 
 
 # ============================================================

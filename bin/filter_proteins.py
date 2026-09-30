@@ -41,7 +41,6 @@ from datetime import datetime
 import pandas as pd
 import yaml
 
-
 # ============================================================
 # Argument parsing
 # ============================================================
@@ -68,7 +67,7 @@ def parse_args() -> argparse.Namespace:
 # ============================================================
 
 def load_params(params_path: str) -> dict:
-    with open(params_path, 'r', encoding='utf-8') as f:
+    with open(params_path, encoding='utf-8') as f:
         return yaml.safe_load(f)
 
 
@@ -174,7 +173,7 @@ def count_detections_per_group(
     # map sample_id -> group
     sample_to_group: dict[str, str] = dict(
         zip(metadata['sample_id'].astype(str),
-            metadata[group_col].astype(str))
+            metadata[group_col].astype(str), strict=True)
     )
 
     # map abundance column -> group
@@ -378,8 +377,8 @@ def write_detection_filter_block(
     report.line(f'  A protein passes if detected (non-missing) in at least '
                 f'{min_detections} replicates')
     report.line('  in at least one group.')
-    report.line(f'Anchor requirement: presence/absence and partial proteins are '
-                f'retained only')
+    report.line('Anchor requirement: presence/absence and partial proteins are '
+                'retained only')
     report.line(f'  if at least one group is an anchor ({anchor_desc}). This prevents '
                 f'proteins')
     report.line('  whose results would rest on heavy MNAR imputation over few real '
@@ -394,7 +393,7 @@ def write_detection_filter_block(
                 f'in one group')
     report.line(f'                     but below threshold (1 to {min_detections - 1} '
                 f'detections) in the other,')
-    report.line(f'                     WITH a fully-detected anchor group.')
+    report.line('                     WITH a fully-detected anchor group.')
     report.line('                     Missing values imputed as a mix of MNAR and MAR.')
     report.line(f'  SINGLE-GROUP     - Detected in >= {min_detections} replicates '
                 f'in one group')
@@ -450,7 +449,7 @@ def write_missingness_overview_block(
 
     sample_to_group: dict[str, str] = dict(
         zip(metadata['sample_id'].astype(str),
-            metadata[group_col].astype(str))
+            metadata[group_col].astype(str), strict=True)
     )
     col_to_group: dict[str, str] = {
         col: sample_to_group[col[len(abund_prefix):]]
@@ -508,8 +507,8 @@ def main() -> None:
     report = Report(run_id, report_path=report_path)
     report.line(f'ProSIFT Validation Report -- {run_id}')
     report.line(f'Generated: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}')
-    report.line(f'Part 2 of 2: Detection Filter (Process 4.4)')
-    report.line(f'  (Part 1: Input Validation -- see validation_report_part1.txt)')
+    report.line('Part 2 of 2: Detection Filter (Process 4.4)')
+    report.line('  (Part 1: Input Validation -- see validation_report_part1.txt)')
 
     print(f'[{run_id}] Applying detection filter...')
 

@@ -55,16 +55,13 @@ import logging
 import math
 import os
 import re
-import sys
 import time
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
 import requests
 import yaml
-
-from prosift_cache import ProteinCache, get_api_key, is_database_enabled, load_db_params
+from prosift_cache import ProteinCache, is_database_enabled, load_db_params
 
 # ============================================================
 # CONSTANTS
@@ -162,7 +159,7 @@ class PubMedClient:
     Handles API key injection and rate limiting transparently.
     """
 
-    def __init__(self, api_key: Optional[str] = None) -> None:
+    def __init__(self, api_key: str | None = None) -> None:
         self.api_key = api_key
         self.rate_limit = RATE_LIMIT_WITH_KEY if api_key else RATE_LIMIT_NO_KEY
         self.min_interval = 1.0 / self.rate_limit
@@ -175,7 +172,7 @@ class PubMedClient:
             logging.warning('No PubMed API key - rate limit: %d/sec (set %s for 10/sec)',
                             self.rate_limit, 'NCBI_API_KEY')
 
-    def esearch_count(self, query: str) -> Optional[int]:
+    def esearch_count(self, query: str) -> int | None:
         """Run an ESearch query and return the hit count.
 
         Parameters
@@ -231,7 +228,7 @@ def compute_pmi(
     symbol_total: int,
     term_count: int,
     total_articles: int,
-) -> Optional[float]:
+) -> float | None:
     """Compute pointwise mutual information (PMI).
 
     PMI = log2(p(protein AND term) / (p(protein) * p(term)))
@@ -341,7 +338,7 @@ def main() -> None:
             logging.info('Total PubMed articles: %d', total_articles)
 
     # --- Step 2: Get per-term total counts (cached) ---
-    term_counts: Dict[str, int] = {}
+    term_counts: dict[str, int] = {}
     for term in search_terms:
         term_key = f'_term_count_{cache_token(term)}'
         cached_term = cache.get(term_key)
@@ -474,14 +471,12 @@ def main() -> None:
             human_pmi = None
 
             # Mouse PMI
-            if mouse_total is not None and mouse_total >= min_pubs_for_score:
-                if mouse_co is not None:
-                    mouse_pmi = compute_pmi(mouse_co, mouse_total, term_count, total_articles)
+            if mouse_total is not None and mouse_total >= min_pubs_for_score and mouse_co is not None:
+                mouse_pmi = compute_pmi(mouse_co, mouse_total, term_count, total_articles)
 
             # Human PMI
-            if human_total is not None and human_total >= min_pubs_for_score:
-                if human_co is not None:
-                    human_pmi = compute_pmi(human_co, human_total, term_count, total_articles)
+            if human_total is not None and human_total >= min_pubs_for_score and human_co is not None:
+                human_pmi = compute_pmi(human_co, human_total, term_count, total_articles)
 
             # Take the max of mouse and human PMI
             if mouse_pmi is not None and human_pmi is not None:

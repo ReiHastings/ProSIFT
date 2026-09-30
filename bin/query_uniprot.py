@@ -45,10 +45,8 @@
 
 import argparse
 import logging
-import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
 
 import pandas as pd
 import requests
@@ -120,7 +118,7 @@ def setup_logging() -> None:
 # UNIPROT API QUERY
 # ============================================================
 
-def build_accession_query(accessions: List[str]) -> str:
+def build_accession_query(accessions: list[str]) -> str:
     """Build a UniProt search query string for a batch of accessions.
 
     Produces: (accession:Q9WTX5) OR (accession:P12345) OR ...
@@ -129,7 +127,7 @@ def build_accession_query(accessions: List[str]) -> str:
     return ' OR '.join(terms)
 
 
-def query_uniprot_batch(accessions: List[str]) -> Dict[str, dict]:
+def query_uniprot_batch(accessions: list[str]) -> dict[str, dict]:
     """Query UniProt REST API for a batch of accessions.
 
     Returns a dict mapping accession -> raw annotation dict.
@@ -182,7 +180,7 @@ def query_uniprot_batch(accessions: List[str]) -> Dict[str, dict]:
     return results
 
 
-def _request_with_retry(url: str, params: Optional[dict] = None) -> Optional[requests.Response]:
+def _request_with_retry(url: str, params: dict | None = None) -> requests.Response | None:
     """Make an HTTP GET request with exponential backoff retry.
 
     Parameters
@@ -212,7 +210,7 @@ def _request_with_retry(url: str, params: Optional[dict] = None) -> Optional[req
     return None
 
 
-def _get_next_link(response: requests.Response) -> Optional[str]:
+def _get_next_link(response: requests.Response) -> str | None:
     """Extract the 'next' pagination URL from the Link header.
 
     UniProt REST API uses RFC 5988 Link headers for pagination:
@@ -346,7 +344,6 @@ def main() -> None:
     )
 
     # --- Determine which accessions need querying ---
-    pid_to_acc = dict(zip(mapping['protein_id'], mapping['uniprot_accession']))
     unique_accessions = mapping['uniprot_accession'].dropna().unique().tolist()
 
     # Check cache for each accession

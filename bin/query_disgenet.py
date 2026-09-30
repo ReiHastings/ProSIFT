@@ -47,15 +47,12 @@
 import argparse
 import logging
 import os
-import sys
 import time
 from pathlib import Path
-from typing import Dict, List, Optional
 
 import pandas as pd
 import requests
 import yaml
-
 from prosift_cache import ProteinCache, is_database_enabled, load_db_params
 
 # ============================================================
@@ -126,7 +123,7 @@ class DisGeNETClient:
         self._last_request_time = 0.0
         self._request_count = 0
 
-    def query_gene(self, gene_id: str) -> Optional[list]:
+    def query_gene(self, gene_id: str) -> list | None:
         """Query DisGeNET for gene-disease associations.
 
         Parameters
@@ -209,7 +206,7 @@ class DisGeNETClient:
         self._last_request_time = time.time()
 
 
-def parse_disgenet_associations(raw: list) -> List[dict]:
+def parse_disgenet_associations(raw: list) -> list[dict]:
     """Parse raw DisGeNET API v1 response into structured rows.
 
     The v1 API (api.disgenet.com) uses camelCase field names:
@@ -356,9 +353,9 @@ def main() -> None:
     # --- Build gene ID lookup ---
     # Use human_ortholog_entrez as the query ID. Fall back to human_ortholog_symbol
     # for genes where Entrez ID is not available (rare).
-    gene_to_pids: Dict[str, List[str]] = {}
-    pid_to_gene: Dict[str, str] = {}
-    pid_to_symbol: Dict[str, str] = {}
+    gene_to_pids: dict[str, list[str]] = {}
+    pid_to_gene: dict[str, str] = {}
+    pid_to_symbol: dict[str, str] = {}
 
     for _, row in queryable.iterrows():
         pid = row['protein_id']
@@ -381,8 +378,8 @@ def main() -> None:
     logging.info('Unique gene IDs to query: %d', len(unique_genes))
 
     # --- Check cache ---
-    cached_data: Dict[str, list] = {}
-    to_query: List[str] = []
+    cached_data: dict[str, list] = {}
+    to_query: list[str] = []
 
     for gene_id in unique_genes:
         hit = cache.get(gene_id)
@@ -394,7 +391,7 @@ def main() -> None:
     logging.info('Cache: %d hits, %d to query', len(cached_data), len(to_query))
 
     # --- Query DisGeNET API ---
-    api_results: Dict[str, Optional[list]] = {}
+    api_results: dict[str, list | None] = {}
     n_errors = 0
 
     if to_query:

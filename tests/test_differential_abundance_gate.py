@@ -52,6 +52,7 @@
 
 import sys
 from pathlib import Path
+from typing import ClassVar
 
 import numpy as np
 import pandas as pd
@@ -61,13 +62,12 @@ import pytest
 # lazily inside _run_one_contrast_r); the functions exercised here never touch R.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'bin'))
 
-from differential_abundance import (  # noqa: E402
+from differential_abundance import (
     assemble_results,
     is_syntactic_r_name,
     parse_and_validate_contrasts,
     summarize_peptide_counts,
 )
-
 
 # ============================================================
 # SHARED HELPERS
@@ -263,7 +263,7 @@ class TestNoIntroducedNaN:
     adjusted p-value must be surfaced/counted, not silently classified 'ns'.
     '''
 
-    _CRITICAL = ['log2_fc', 'deqms_adj_pvalue']
+    _CRITICAL: ClassVar[list] = ['log2_fc', 'deqms_adj_pvalue']
 
     def test_no_nan_introduced_on_clean_input(self):
         out = assemble_results(_deqms_raw(), _id_mapping(), _params(),
@@ -363,7 +363,7 @@ class TestNonSyntacticGroupLabel:
         with pytest.raises(ValueError):
             parse_and_validate_contrasts(params, groups)
 
-    def test_non_syntactic_UNUSED_but_present_group_still_rejected(self):
+    def test_non_syntactic_unused_but_present_group_still_rejected(self):
         # A non-syntactic group that HAS samples in the run but is named in NO
         # contrast is still rejected: it gets a design-matrix column, so it is in
         # R's levels vector and makeContrasts() would reject the whole vector.
@@ -410,7 +410,7 @@ class TestRNameParity:
     '''
 
     # (name, make.names(name) == name in R)
-    _BATTERY = [
+    _BATTERY: ClassVar[list] = [
         ('WT', True), ('KO', True), ('HET', True),
         ('WT.2', True), ('HET_1', True), ('group1', True), ('.foo', True),
         ('WT-A', False),     # hyphen

@@ -45,7 +45,6 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import yaml
-
 from prosift_plot_utils import FILTER_CATEGORY_COLORS, FILTER_CATEGORY_ORDER
 
 # Color palette (D3, colorblind-friendly)
@@ -514,7 +513,7 @@ def main() -> None:
     # Resolve the metadata group column explicitly from params.yml. Inferring
     # it as "first non-sample_id column" breaks when design.covariates or
     # design.batch_column are populated in metadata.
-    with open(args.params, "r", encoding="utf-8") as f:
+    with open(args.params, encoding="utf-8") as f:
         params = yaml.safe_load(f)
     group_col = params["design"]["group_column"]
 
@@ -560,7 +559,7 @@ def main() -> None:
         "missingness_heatmap",
         "missingness_histogram",
     ]
-    for (_, fig), name in zip(figs, plot_names):
+    for (_, fig), name in zip(figs, plot_names, strict=True):
         # String concatenation to avoid Path.with_suffix replacing multi-part stems
         png_path = plots_dir / (run_id + "." + name + ".png")
         logging.info("Writing PNG: %s", png_path)

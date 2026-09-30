@@ -36,14 +36,13 @@
 #       --outdir    results/CTXcyto_WT_vs_CTXcyto_KO/validation
 
 import argparse
+import os
 import re
 import sys
-import os
 from datetime import datetime
 
 import pandas as pd
 import yaml
-
 
 # ============================================================
 # Argument parsing
@@ -72,7 +71,7 @@ def parse_args() -> argparse.Namespace:
 
 def load_params(params_path: str) -> dict:
     '''Load and return params.yml as a dict.'''
-    with open(params_path, 'r', encoding='utf-8') as f:
+    with open(params_path, encoding='utf-8') as f:
         return yaml.safe_load(f)
 
 
@@ -84,7 +83,7 @@ def infer_separator(filepath: str) -> str:
     if ext in ('.tsv', '.txt'):
         return '\t'
     # sniff first line
-    with open(filepath, 'r', encoding='utf-8-sig') as f:
+    with open(filepath, encoding='utf-8-sig') as f:
         first = f.readline()
     return '\t' if first.count('\t') > first.count(',') else ','
 
@@ -438,7 +437,7 @@ def validate_matrix(
                     'will not be available; falling back to limma.')
 
     # --- Return subset of columns only ---
-    keep_cols = [id_col] + abund_cols + pep_cols
+    keep_cols = [id_col, *abund_cols, *pep_cols]
     df = df[keep_cols].copy()
 
     # --- Build provenance mask (protein_id + one bool column per abundance
@@ -710,7 +709,7 @@ def cross_validate(
     else:
         keep_pep_cols = []
 
-    matrix_out = matrix[[id_col] + keep_abund_cols + keep_pep_cols].copy()
+    matrix_out = matrix[[id_col, *keep_abund_cols, *keep_pep_cols]].copy()
 
     # --- Subset metadata to matched samples ---
     meta_out = metadata[metadata['sample_id'].astype(str).isin(matched)].copy()
@@ -718,7 +717,7 @@ def cross_validate(
     # --- Check group sizes ---
     group_counts = meta_out.groupby(group_col)['sample_id'].count()
     report.line()
-    report.info(f'Samples per group (working set):')
+    report.info('Samples per group (working set):')
     for grp, n in group_counts.items():
         report.info(f'  {grp}: {n}')
 
@@ -801,8 +800,8 @@ def main() -> None:
     # --- Report header ---
     report.line(f'ProSIFT Validation Report -- {run_id}')
     report.line(f'Generated: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}')
-    report.line(f'Part 1 of 2: Input Validation (Processes 4.1-4.3)')
-    report.line(f'  (Part 2: Detection Filter -- see validation_report_part2.txt)')
+    report.line('Part 1 of 2: Input Validation (Processes 4.1-4.3)')
+    report.line('  (Part 2: Detection Filter -- see validation_report_part2.txt)')
 
     print(f'[{run_id}] Validating inputs...')
 

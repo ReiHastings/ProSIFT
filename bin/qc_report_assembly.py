@@ -53,7 +53,6 @@ import plotly.graph_objects as go
 import plotly.io as pio
 import scipy.stats
 import yaml
-
 from prosift_plot_utils import (
     FILTER_CATEGORY_COLORS,
     FILTER_CATEGORY_ORDER,
@@ -63,7 +62,6 @@ from prosift_plot_utils import (
     plot_density,
     plot_intensity_boxplots,
 )
-
 
 # ============================================================
 # ARGUMENT PARSING
@@ -445,10 +443,7 @@ def plot_imputation_overlay(
     Re-rendered from imputed matrix and imputation mask.
     """
     # Ensure both DataFrames have protein_id as index
-    if 'protein_id' in mask_df.columns:
-        mask_vals = mask_df.set_index('protein_id')
-    else:
-        mask_vals = mask_df
+    mask_vals = mask_df.set_index('protein_id') if 'protein_id' in mask_df.columns else mask_df
     if 'protein_id' in imputed_df.columns:
         imp_vals = imputed_df.set_index('protein_id')
     else:
@@ -498,15 +493,13 @@ def plot_imputation_fractions(
     run_id: str,
 ) -> go.Figure:
     """Per-sample imputation fraction bar chart from imputation mask."""
-    if 'protein_id' in mask_df.columns:
-        mask_vals = mask_df.set_index('protein_id')
-    else:
-        mask_vals = mask_df
+    mask_vals = mask_df.set_index('protein_id') if 'protein_id' in mask_df.columns else mask_df
     sample_cols = list(mask_vals.columns)
 
     group_of = dict(zip(
         metadata_df['sample_id'].astype(str),
         metadata_df[group_col].astype(str),
+        strict=True,
     ))
     sample_order = sorted(sample_cols, key=lambda s: (group_of.get(s, ''), s))
 
@@ -1164,7 +1157,7 @@ def main() -> None:
     report_path.write_text(html, encoding='utf-8')
     report_size_kb = report_path.stat().st_size / 1024
     logging.info(f'  Saved: {report_path.name} ({report_size_kb:.0f} KB)')
-    logging.info(f'Module 03b QC Report Assembly complete.')
+    logging.info('Module 03b QC Report Assembly complete.')
 
 
 if __name__ == '__main__':

@@ -44,15 +44,12 @@
 
 import argparse
 import logging
-import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
 
 import pandas as pd
 import requests
 import yaml
-
 from prosift_cache import ProteinCache, is_database_enabled, load_db_params
 
 # ============================================================
@@ -141,7 +138,7 @@ def setup_logging() -> None:
 # DGIdb GraphQL API
 # ============================================================
 
-def query_dgidb_gene(gene_symbol: str) -> Optional[dict]:
+def query_dgidb_gene(gene_symbol: str) -> dict | None:
     """Query DGIdb GraphQL API for a single gene.
 
     Returns the raw API response as a dict, or None on failure.
@@ -171,7 +168,7 @@ def query_dgidb_gene(gene_symbol: str) -> Optional[dict]:
     return None
 
 
-def parse_dgidb_response(raw: dict, gene_symbol: str) -> List[dict]:
+def parse_dgidb_response(raw: dict, gene_symbol: str) -> list[dict]:
     """Parse a DGIdb GraphQL response into interaction rows.
 
     Parameters
@@ -310,8 +307,8 @@ def main() -> None:
     # --- Build protein_id -> human_symbol lookup ---
     # Multiple protein_ids can map to the same human symbol; we query each
     # unique symbol once and fan out the results.
-    symbol_to_pids: Dict[str, List[str]] = {}
-    pid_to_symbol: Dict[str, str] = {}
+    symbol_to_pids: dict[str, list[str]] = {}
+    pid_to_symbol: dict[str, str] = {}
     for _, row in queryable.iterrows():
         pid = row['protein_id']
         sym = row.get('human_ortholog_symbol')
@@ -323,8 +320,8 @@ def main() -> None:
     logging.info('Unique human ortholog symbols to query: %d', len(unique_symbols))
 
     # --- Check cache, collect symbols needing queries ---
-    cached_data: Dict[str, List[dict]] = {}
-    to_query: List[str] = []
+    cached_data: dict[str, list[dict]] = {}
+    to_query: list[str] = []
 
     for sym in unique_symbols:
         hit = cache.get(sym)
@@ -336,7 +333,7 @@ def main() -> None:
     logging.info('Cache: %d hits, %d to query', len(cached_data), len(to_query))
 
     # --- Query DGIdb API ---
-    api_results: Dict[str, List[dict]] = {}
+    api_results: dict[str, list[dict]] = {}
     n_errors = 0
 
     if to_query:

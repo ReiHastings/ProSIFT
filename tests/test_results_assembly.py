@@ -481,7 +481,7 @@ def test_sample_qc_flags_table(assembled_db):
     conn.close()
     assert pk == ['sample_id']
     assert len(df) == 4                                   # 4 synthetic samples
-    for col in _FLAG_COLS + ['group', 'n_flags']:
+    for col in [*_FLAG_COLS, 'group', 'n_flags']:
         assert col in df.columns
     # S_WT-1 fires extreme_median; S_KO-1 fires pca_outlier (see _flags_frame).
     assert bool(df.loc['S_WT-1', 'flag_extreme_median']) is True

@@ -51,13 +51,10 @@
 
 import argparse
 import logging
-import sys
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
 
 import pandas as pd
 import yaml
-
 from prosift_cache import BulkFileCache, is_database_enabled, load_db_params
 
 # ============================================================
@@ -134,7 +131,7 @@ def setup_logging() -> None:
 
 def build_entrez_lookups(
     mapping: pd.DataFrame,
-) -> Tuple[Dict[str, List[str]], Dict[str, List[str]], Set[str]]:
+) -> tuple[dict[str, list[str]], dict[str, list[str]], set[str]]:
     """Build Entrez ID -> protein_id lookup dicts for mouse and human.
 
     Parameters
@@ -151,9 +148,9 @@ def build_entrez_lookups(
     all_entrez : set
         Union of all Entrez IDs (as strings) for fast row filtering.
     """
-    mouse_lookup: Dict[str, List[str]] = {}
-    human_lookup: Dict[str, List[str]] = {}
-    all_entrez: Set[str] = set()
+    mouse_lookup: dict[str, list[str]] = {}
+    human_lookup: dict[str, list[str]] = {}
+    all_entrez: set[str] = set()
 
     for _, row in mapping.iterrows():
         pid = row['protein_id']
@@ -177,10 +174,10 @@ def build_entrez_lookups(
 
 def filter_ctd_file(
     ctd_path: Path,
-    mouse_lookup: Dict[str, List[str]],
-    human_lookup: Dict[str, List[str]],
-    all_entrez: Set[str],
-) -> List[dict]:
+    mouse_lookup: dict[str, list[str]],
+    human_lookup: dict[str, list[str]],
+    all_entrez: set[str],
+) -> list[dict]:
     """Read and filter the CTD bulk file for matching interactions.
 
     Reads the gzipped TSV in chunks for memory efficiency. Filters rows

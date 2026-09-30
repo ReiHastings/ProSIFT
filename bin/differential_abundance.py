@@ -54,9 +54,7 @@ import yaml
 # linked -- an uncatchable native crash that would make this module un-importable
 # for the pure-Python tests, --help, or CI. Lazy loading keeps the module import
 # side-effect-free; the R stack is only touched when a fit is actually run.
-
 from prosift_plot_utils import save_plot
-
 
 # ============================================================
 # CONSTANTS
@@ -181,6 +179,7 @@ def build_group_map(metadata_df: pd.DataFrame, params: dict) -> dict[str, str]:
         zip(
             metadata_df["sample_id"].astype(str),
             metadata_df[group_col].astype(str),
+            strict=True,
         )
     )
 
@@ -460,7 +459,7 @@ def write_provenance(
 
     def _counts(exclude: set) -> str:
         counts: dict[str, int] = {}
-        for s, g in zip(sample_ids, groups):
+        for s, g in zip(sample_ids, groups, strict=True):
             if s not in exclude:
                 counts[g] = counts.get(g, 0) + 1
         return ", ".join(f"{g}={counts[g]}" for g in sorted(counts))
@@ -905,8 +904,6 @@ def write_summary_txt(
 
     for contrast_user, numerator, denominator, df in contrast_results:
         n_proteins   = len(df)
-        n_numerator  = int((df["direction"] != "ns").any())  # placeholder; compute below
-        group_col    = params["design"]["group_column"]
 
         # Count samples per group
         n_sig  = int(df["significant"].sum())
@@ -941,7 +938,7 @@ def write_summary_txt(
             lines += [
                 "PEPTIDE COUNTS (DEqMS)",
                 "----------------------------------------",
-                f"Summary method:           min of nonzero values per protein",
+                "Summary method:           min of nonzero values per protein",
                 f"Median count:             {pep.median():.1f}",
                 f"Range:                    {int(pep.min())} - {int(pep.max())}",
                 "",
@@ -985,7 +982,7 @@ def write_summary_txt(
             pval = row[primary_pval_col]
             pval_str = f"{pval:.3e}" if pd.notna(pval) else "NA"
             lines.append(
-                f"  {str(row['protein_id']):<24} {gene:<16} "
+                f"  {row['protein_id']!s:<24} {gene:<16} "
                 f"{row['log2_fc']:>8.3f}  {pval_str:>12}"
             )
 
@@ -1054,8 +1051,6 @@ def plot_volcano(
     )
 
     neg_log_p = -np.log10(df[primary_col].clip(lower=1e-300).astype(float))
-    log2_fc   = df["log2_fc"].astype(float)
-
     color_map = {"up": _COLOR_UP, "down": _COLOR_DN, "ns": _COLOR_NS}
     traces: dict[str, dict] = {"up": {"x": [], "y": [], "text": []},
                                 "down": {"x": [], "y": [], "text": []},
@@ -1287,7 +1282,7 @@ def main() -> None:
         logging.info("  eBayes robust=TRUE enabled")
 
     # --- Summarize peptide counts (DEqMS path only) ---
-    pep_counts: "pd.Series | None" = None
+    pep_counts: pd.Series | None = None
     if use_deqms:
         logging.info("Summarizing peptide counts (min of nonzero per protein)...")
         pep_counts = summarize_peptide_counts(pep_df)

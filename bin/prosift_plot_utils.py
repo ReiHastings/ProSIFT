@@ -356,8 +356,8 @@ def compute_and_plot_pca(
                 showlegend=show_legend,
                 hovertemplate=(
                     "<b>%{text}</b><br>"
-                    f"PC1: %{{x:.3f}}<br>"
-                    f"PC2: %{{y:.3f}}<extra></extra>"
+                    "PC1: %{x:.3f}<br>"
+                    "PC2: %{y:.3f}<extra></extra>"
                 ),
             )
         )
@@ -455,7 +455,7 @@ def compute_and_plot_correlation(
     zmin = max(0.80, np.floor(min_corr * 20) / 20)
 
     # --- Build clustermap figure with dendrogram on top ---
-    group_of = dict(zip(summary_df['sample_id'], summary_df['group'].astype(str)))
+    group_of = dict(zip(summary_df['sample_id'], summary_df['group'].astype(str), strict=True))
     axis_labels = [f'{group_of[s]}: {s}' for s in ordered_samples]
 
     # Subplot layout: dendrogram on top (row 1), heatmap below (row 2)
@@ -469,7 +469,7 @@ def compute_and_plot_correlation(
     # Step 1: Draw dendrogram arms
     icoord = dendro_result['icoord']  # x coordinates of dendrogram links
     dcoord = dendro_result['dcoord']  # y coordinates (heights)
-    for xs, ys in zip(icoord, dcoord):
+    for xs, ys in zip(icoord, dcoord, strict=True):
         # scipy dendrogram uses 5, 15, 25... as leaf positions (step of 10);
         # remap to 0-based sample indices for alignment with heatmap
         mapped_xs = [(x - 5) / 10 for x in xs]

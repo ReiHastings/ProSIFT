@@ -44,10 +44,9 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import yaml
+from prosift_plot_utils import make_color_map, save_plot
 from scipy.stats import gaussian_kde
 from sklearn.impute import KNNImputer
-
-from prosift_plot_utils import make_color_map, save_plot
 
 # ============================================================
 # ARGUMENT PARSING
@@ -150,7 +149,7 @@ def build_group_map(metadata_df: pd.DataFrame, params: dict) -> dict[str, str]:
     if group_column not in metadata_df.columns:
         raise ValueError(f"Group column '{group_column}' not found in metadata.")
     return dict(zip(metadata_df["sample_id"].astype(str),
-                    metadata_df[group_column].astype(str)))
+                    metadata_df[group_column].astype(str), strict=True))
 
 
 # ============================================================
@@ -638,7 +637,7 @@ def plot_imputation_fractions(
     sample_order = (
         summary_df.sort_values(["group", "sample_id"])["sample_id"].tolist()
     )
-    group_of = dict(zip(summary_df["sample_id"], summary_df["group"].astype(str)))
+    group_of = dict(zip(summary_df["sample_id"], summary_df["group"].astype(str), strict=True))
 
     n_proteins = len(missing_mask)
     shown_groups: set[str] = set()

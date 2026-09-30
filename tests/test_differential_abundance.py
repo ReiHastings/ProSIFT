@@ -580,13 +580,13 @@ class TestContrastOrientation:
         write_summary_txt(primary, 'RUN', 'DEqMS',
                           _params(['CTXcyto_KO_vs_CTXcyto_WT']), tmp_path)
         lines = (tmp_path / 'RUN.diff_abundance_summary.txt').read_text().splitlines()
-        down = next(l for l in lines if l.startswith('  Down (higher in CTXcyto_WT):'))
+        down = next(line for line in lines if line.startswith('  Down (higher in CTXcyto_WT):'))
         assert 'CTXcyto_WT): ' in down                  # at least one space
         short = [('KO_vs_WT', 'KO', 'WT', _summary_frame(3, 2))]
         write_summary_txt(short, 'RUN2', 'DEqMS', _params(['KO_vs_WT']), tmp_path)
         lines2 = (tmp_path / 'RUN2.diff_abundance_summary.txt').read_text().splitlines()
-        up  = next(l for l in lines2 if l.startswith('  Up (higher in KO):'))
-        sig = next(l for l in lines2 if l.startswith('Significant proteins:'))
+        up  = next(line for line in lines2 if line.startswith('  Up (higher in KO):'))
+        sig = next(line for line in lines2 if line.startswith('Significant proteins:'))
         # Short labels share the value column with the fixed-width rows (26).
         assert up[26:27].isdigit() and sig[26:27].isdigit()
 

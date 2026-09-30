@@ -33,7 +33,6 @@ import csv
 import os
 import sys
 
-
 # ============================================================
 # Source file column constants
 # ============================================================
@@ -82,7 +81,7 @@ for sid in SAMPLE_IDS:
 
 def load_source(filepath):
     '''Load the source CSV and return headers + list of row dicts.'''
-    with open(filepath, 'r', encoding='utf-8-sig') as f:
+    with open(filepath, encoding='utf-8-sig') as f:
         reader = csv.DictReader(f)
         headers = reader.fieldnames
         rows = list(reader)
@@ -117,7 +116,7 @@ def write_abundance_csv(filepath, rows):
             protein_id = extract_protein_id(row[PROTEIN_ID_COL])
             abund_vals = [row.get(col, '') for col in abundance_src_cols]
             pep_vals = [row.get(col, '') for col in peptide_src_cols]
-            writer.writerow([protein_id] + abund_vals + pep_vals)
+            writer.writerow([protein_id, *abund_vals, *pep_vals])
 
     print(f'  Wrote {filepath}')
     print(f'    {len(rows)} proteins x {len(SAMPLE_IDS)} samples '
@@ -205,7 +204,7 @@ def main():
     write_metadata_csv(os.path.join(args.outdir, 'CTX_metadata.csv'))
     write_protein_reference(os.path.join(args.outdir, 'CTX_protein_reference.csv'), rows)
 
-    print(f'\nDone. Next step: define runs with generate_run_config.py')
+    print('\nDone. Next step: define runs with generate_run_config.py')
 
 
 if __name__ == '__main__':

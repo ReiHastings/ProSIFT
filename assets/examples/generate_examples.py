@@ -38,11 +38,9 @@
 
 import argparse
 import os
-from typing import Dict, List, Tuple
 
 import numpy as np
 import pandas as pd
-
 
 # ============================================================
 # 1. Example study design
@@ -51,11 +49,11 @@ import pandas as pd
 # exercises DEqMS variance moderation and leaves room for a per-group detection
 # threshold of 2 (see qc.min_detections_per_group in the example params.yml).
 
-GROUPS: Dict[str, List[str]] = {
+GROUPS: dict[str, list[str]] = {
     'CTRL':  ['CTRL_1', 'CTRL_2', 'CTRL_3'],
     'TREAT': ['TREAT_1', 'TREAT_2', 'TREAT_3'],
 }
-SAMPLES: List[str] = [s for ids in GROUPS.values() for s in ids]
+SAMPLES: list[str] = [s for ids in GROUPS.values() for s in ids]
 
 
 # ============================================================
@@ -73,7 +71,7 @@ SAMPLES: List[str] = [s for ids in GROUPS.values() for s in ids]
 # Nor is the example offline: UNIPROT_MAPPING is not gated by databases.enabled
 # and is a hard dependency of Module 04. See KNOWN_ISSUES.md E-2.
 
-GENE_BLOCKS: Dict[str, List[str]] = {
+GENE_BLOCKS: dict[str, list[str]] = {
     'EXAMPLE_SYNAPTIC_VESICLE_CYCLE': [
         'Snap25', 'Syn1', 'Syt1', 'Stx1a', 'Vamp2',
         'Sypl1', 'Dlg4', 'Nrxn1', 'Nlgn2', 'Cplx1',
@@ -109,7 +107,7 @@ GENE_BLOCKS: Dict[str, List[str]] = {
 # ~40 tests, a subtle effect would not survive, and a test profile that produces
 # zero significant hits is a poor smoke test.
 
-EFFECTS: Dict[str, float] = {
+EFFECTS: dict[str, float] = {
     'EXAMPLE_ASTROCYTE_MARKERS':        2.5,   # up in TREAT
     'EXAMPLE_MITOCHONDRIAL_RESPIRATION': -2.0,  # down in TREAT
 }
@@ -171,7 +169,7 @@ def build_panel() -> pd.DataFrame:
 def simulate_abundances(
     panel: pd.DataFrame,
     rng: np.random.Generator
-) -> Tuple[pd.DataFrame, pd.DataFrame]:
+) -> tuple[pd.DataFrame, pd.DataFrame]:
     '''
     Simulate log2 abundances and peptide counts.
 
@@ -295,7 +293,7 @@ def write_gmt(panel: pd.DataFrame, outdir: str) -> str:
     with open(path, 'w', encoding='utf-8') as f:
         for block, genes in GENE_BLOCKS.items():
             desc = 'ProSIFT synthetic example gene set'
-            f.write('\t'.join([block, desc] + genes) + '\n')
+            f.write('\t'.join([block, desc, *genes]) + '\n')
     return path
 
 

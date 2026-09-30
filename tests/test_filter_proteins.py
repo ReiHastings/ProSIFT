@@ -29,6 +29,7 @@
 import subprocess
 import sys
 from pathlib import Path
+from typing import ClassVar
 
 import numpy as np
 import pandas as pd
@@ -39,7 +40,7 @@ import pytest
 _BIN_DIR = Path(__file__).resolve().parent.parent / 'bin'
 sys.path.insert(0, str(_BIN_DIR))
 
-from filter_proteins import (
+from filter_proteins import (  # noqa: E402  (needs bin/ on sys.path, set above)
     classify_proteins,
     count_detections_per_group,
     validate_min_present_detections,
@@ -277,8 +278,8 @@ class TestEndToEndCLI:
     out) so the fix is guarded through the real CLI, not just the function.
     '''
 
-    _SAMPLES = ['WT-1', 'WT-2', 'WT-3', 'KO-1', 'KO-2', 'KO-3']
-    _GROUPS = ['WT', 'WT', 'WT', 'KO', 'KO', 'KO']
+    _SAMPLES: ClassVar[list] = ['WT-1', 'WT-2', 'WT-3', 'KO-1', 'KO-2', 'KO-3']
+    _GROUPS: ClassVar[list] = ['WT', 'WT', 'WT', 'KO', 'KO', 'KO']
 
     def _row(self, n_wt, n_ko, rng):
         '''One abundance row detected in n_wt WT reps and n_ko KO reps.'''
@@ -391,7 +392,7 @@ class TestValidateMinPresentDetections:
     presence/absence proteins, or disables the gate).
     '''
 
-    SIZES = {'WT': 3, 'KO': 3}
+    SIZES: ClassVar[dict] = {'WT': 3, 'KO': 3}
 
     def test_none_is_valid(self):
         '''None (default) means "require full detection" -- always valid.'''
@@ -433,7 +434,7 @@ class TestMultiGroup:
     '''The anchor gate generalizes beyond two groups (the pipeline supports
     >= 2 groups). Per-group anchor thresholds are independent.'''
 
-    SIZES_3 = {'A': 3, 'B': 3, 'C': 3}
+    SIZES_3: ClassVar[dict] = {'A': 3, 'B': 3, 'C': 3}
 
     def _counts(self, a, b, c):
         return pd.DataFrame({'A': [a], 'B': [b], 'C': [c]}, index=['prot'])

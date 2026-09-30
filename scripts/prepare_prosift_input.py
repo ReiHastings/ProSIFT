@@ -64,7 +64,7 @@ except ImportError:
 
 def load_config(config_path):
     '''Load and return the run config YAML.'''
-    with open(config_path, 'r', encoding='utf-8') as f:
+    with open(config_path, encoding='utf-8') as f:
         config = yaml.safe_load(f)
     return config
 
@@ -76,7 +76,7 @@ def resolve_path(base_dir, filename):
 
 def load_csv(filepath):
     '''Load a CSV file and return (headers, rows) where rows is a list of dicts.'''
-    with open(filepath, 'r', encoding='utf-8-sig') as f:
+    with open(filepath, encoding='utf-8-sig') as f:
         reader = csv.DictReader(f)
         headers = reader.fieldnames
         rows = list(reader)
@@ -335,7 +335,6 @@ def main():
     source = config['source']
     runs = config['runs']
 
-    protein_id_col = source['protein_id_column']
     abund_prefix = source.get('abundance_prefix', '')
     pep_prefix = source.get('peptide_count_prefix', None)
 
@@ -348,7 +347,7 @@ def main():
     print(f'  {len(rows)} proteins, {len(headers)} columns')
 
     validate_config(config, headers, config_dir)
-    print(f'  Validation passed.')
+    print('  Validation passed.')
 
     # ----------------------------------------------------------
     # 3. Process each run
@@ -408,7 +407,7 @@ def main():
     samplesheet_path = os.path.join(outdir, 'samplesheet.csv')
     write_samplesheet(samplesheet_path, samplesheet_rows)
     print(f'Written samplesheet.csv ({len(samplesheet_rows)} runs) to {outdir}/')
-    print(f'  Note: samplesheet uses absolute paths -- regenerate after rsyncing to a new machine.')
+    print('  Note: samplesheet uses absolute paths -- regenerate after rsyncing to a new machine.')
 
     print(f'\nDone. {len(runs)} runs written to {outdir}/')
 

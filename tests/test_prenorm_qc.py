@@ -47,8 +47,7 @@ import pytest
 # mechanism established by test_prosift_cache.py.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'bin'))
 
-from prenorm_qc import compute_sample_flags  # noqa: E402
-
+from prenorm_qc import compute_sample_flags
 
 # ============================================================
 # TEST HELPERS

@@ -128,7 +128,7 @@ def prompt_comma_list(message):
 
 def detect_delimiter(filepath):
     '''Detect whether a file is CSV or TSV by inspecting the first line.'''
-    with open(filepath, 'r', encoding='utf-8-sig') as f:
+    with open(filepath, encoding='utf-8-sig') as f:
         first_line = f.readline()
     tab_count = first_line.count('\t')
     comma_count = first_line.count(',')
@@ -137,7 +137,7 @@ def detect_delimiter(filepath):
 
 def load_headers(filepath, delimiter):
     '''Load column headers from a delimited file.'''
-    with open(filepath, 'r', encoding='utf-8-sig') as f:
+    with open(filepath, encoding='utf-8-sig') as f:
         reader = csv.reader(f, delimiter=delimiter)
         headers = next(reader)
     return [h.strip() for h in headers]
@@ -146,7 +146,7 @@ def load_headers(filepath, delimiter):
 def load_data(filepath, delimiter):
     '''Load the full dataset as a list of dicts.'''
     rows = []
-    with open(filepath, 'r', encoding='utf-8-sig') as f:
+    with open(filepath, encoding='utf-8-sig') as f:
         reader = csv.DictReader(f, delimiter=delimiter)
         for row in reader:
             rows.append(row)
@@ -299,7 +299,7 @@ def main():
                 print(f'  [{i}] {h}')
             candidates = list(headers)
         else:
-            print(f'No "protein_id" column found. Non-numeric columns:')
+            print('No "protein_id" column found. Non-numeric columns:')
             for i, col in enumerate(candidates, 1):
                 print(f'  [{i}] {col}')
 
@@ -372,7 +372,7 @@ def main():
                 sample_ids = list(meta_sample_ids)
                 print(f'  Selected: "{abundance_prefix}"')
             else:
-                print(f'Error: could not match metadata sample IDs to abundance matrix columns.')
+                print('Error: could not match metadata sample IDs to abundance matrix columns.')
                 print(f'  Metadata samples (first 5): {meta_sample_ids[:5]}')
                 print(f'  Matrix columns (first 10): {headers[:10]}')
                 sys.exit(1)
@@ -386,7 +386,7 @@ def main():
         print(f'Peptide count columns found: {len(auto_pep)} (prefix: "peptide_count_")')
     else:
         # fallback: check remaining numeric columns and ask
-        selected_cols = set(abundance_cols + [protein_id_col])
+        selected_cols = set([*abundance_cols, protein_id_col])
         remaining_cols = [h for h in headers if h not in selected_cols]
         numeric_remaining = []
         for col in remaining_cols:
@@ -399,7 +399,7 @@ def main():
                 numeric_remaining.append(col)
 
         if numeric_remaining:
-            print(f'No "peptide_count_" columns found.')
+            print('No "peptide_count_" columns found.')
             print(f'Remaining numeric columns ({len(numeric_remaining)}):')
             show_count = min(8, len(numeric_remaining))
             for col in numeric_remaining[:show_count]:

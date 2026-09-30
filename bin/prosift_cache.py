@@ -48,7 +48,7 @@ import logging
 import os
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -106,7 +106,7 @@ class ProteinCache:
 
     # --- Public API ---
 
-    def get(self, cache_key: str) -> Optional[Any]:
+    def get(self, cache_key: str) -> Any | None:
         """Retrieve a cached entry by key.
 
         Returns the deserialized JSON data if the cache file exists and is not
@@ -143,7 +143,7 @@ class ProteinCache:
 
         # Read and deserialize
         try:
-            with open(path, 'r') as fh:
+            with open(path) as fh:
                 data = json.load(fh)
             self.hits += 1
             return data
@@ -197,11 +197,11 @@ class ProteinCache:
     def _init_metadata(self) -> None:
         """Create or update _metadata.json in the cache directory."""
         meta_path = self.cache_dir / '_metadata.json'
-        now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        now = datetime.datetime.now(datetime.UTC).isoformat()
 
         if meta_path.exists():
             try:
-                with open(meta_path, 'r') as fh:
+                with open(meta_path) as fh:
                     meta = json.load(fh)
             except (json.JSONDecodeError, OSError):
                 meta = {}
@@ -224,7 +224,7 @@ class ProteinCache:
         meta_path = self.cache_dir / '_metadata.json'
         if not meta_path.exists():
             return {}
-        with open(meta_path, 'r') as fh:
+        with open(meta_path) as fh:
             return json.load(fh)
 
     # --- Internal helpers ---
@@ -280,7 +280,7 @@ class BulkFileCache:
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self._init_metadata()
 
-    def get_file(self, filename: str) -> Optional[Path]:
+    def get_file(self, filename: str) -> Path | None:
         """Return the path to the cached file if it exists and is fresh.
 
         Parameters
@@ -316,11 +316,11 @@ class BulkFileCache:
     def _init_metadata(self) -> None:
         """Create or update _metadata.json."""
         meta_path = self.cache_dir / '_metadata.json'
-        now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        now = datetime.datetime.now(datetime.UTC).isoformat()
 
         if meta_path.exists():
             try:
-                with open(meta_path, 'r') as fh:
+                with open(meta_path) as fh:
                     meta = json.load(fh)
             except (json.JSONDecodeError, OSError):
                 meta = {}
@@ -402,7 +402,7 @@ def is_database_enabled(db_params: dict, database_name: str) -> bool:
     return database_name in db_params['enabled']
 
 
-def get_api_key(env_var_name: str, required: bool = True) -> Optional[str]:
+def get_api_key(env_var_name: str, required: bool = True) -> str | None:
     """Read an API key from an environment variable.
 
     Parameters
