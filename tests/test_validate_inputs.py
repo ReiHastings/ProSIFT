@@ -232,3 +232,69 @@ class TestAbundanceTypeHandling:
         # The literal 0.0 survives as a real value under log2 semantics.
         assert matrix.loc['EDGE_ZERO', 'abundance_KO-1'] == 0.0
         assert int(mask.to_numpy().sum()) == 0
+
+
+
+# ============================================================
+# Contrast orientation (run_id order vs contrast order)
+# ============================================================
+
+sys.path.insert(0, str(PROJECT_ROOT / 'bin'))
+from validate_inputs import run_id_order_reversed  # noqa: E402
+
+
+class TestRunIdOrderReversed:
+
+    @pytest.mark.parametrize('run_id,num,den', [
+        ('CTXcyto_WT_vs_CTXcyto_KO', 'KO', 'WT'),
+        ('CTXcyto_WT_vs_HIPcyto_WT', 'HIP', 'CTX'),
+        ('HIPcyto_WT_vs_HIPsynap_WT', 'synap', 'cyto'),
+        ('WT_vs_WT2', 'WT2', 'WT'),        # nested names: whole token wins
+        ('wt_vs_ko', 'KO', 'WT'),          # case-insensitive
+    ])
+    def test_production_names_are_flagged(self, run_id, num, den):
+        assert run_id_order_reversed(run_id, num, den)
+
+    @pytest.mark.parametrize('run_id,num,den', [
+        ('CTXcyto_KO_vs_CTXcyto_WT', 'KO', 'WT'),   # same order: fine
+        ('bench', 'KO', 'WT'),                      # no _vs_ in run name
+        ('KO_WT_vs_other', 'KO', 'WT'),             # both groups on one side
+        ('A_vs_B', 'KO', 'WT'),                     # groups not mentioned
+        ('Batch1_vs_Area2', 'A', 'B'),              # 'A' must not match 'Area2'
+    ])
+    def test_non_reversed_or_ambiguous_not_flagged(self, run_id, num, den):
+        assert not run_id_order_reversed(run_id, num, den)
+
+
+class TestContrastOrientationCli:
+
+    def _run(self, run_id, tmp_path):
+        proc = _run_validate(
+            BENCH / 'benchmark_abundance.csv', BENCH / 'benchmark_metadata.csv',
+            BENCH / 'benchmark_params.yml', run_id, tmp_path,
+        )
+        assert proc.returncode == 0, proc.stderr
+        report = (tmp_path / f'{run_id}.validation_report_part1.txt').read_text()
+        return proc, report
+
+    def test_reversed_run_id_warns_but_passes(self, tmp_path):
+        # Benchmark contrast is KO_vs_WT; the run name puts WT first.
+        proc, report = self._run('WT_vs_KO', tmp_path)
+        assert 'KO_vs_WT: positive log2 FC / NES = higher in KO than WT' in report
+        assert 'opposite order' in report
+        assert 'opposite order' in proc.stderr
+
+    def test_matching_run_id_does_not_warn(self, tmp_path):
+        proc, report = self._run('KO_vs_WT', tmp_path)
+        assert 'CONTRAST ORIENTATION' in report
+        assert 'opposite order' not in report
+        assert 'opposite order' not in proc.stderr
+
+
+
+def test_orientation_check_tolerates_null_design():
+    # 'design:' present but empty parses to None; the check must not crash.
+    from validate_inputs import Report, check_contrast_orientation
+    report = Report('RUN')
+    check_contrast_orientation('WT_vs_KO', {'design': None}, report)
+    assert report.warning_count == 0

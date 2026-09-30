@@ -4,15 +4,48 @@
 # author: Reina Hastings
 # contact: reinahastings13@gmail.com
 # date created: 2026-07-24
-# last modified: 2026-07-24
+# last modified: 2026-09-30
 #
 # purpose:
 #   Permanent empirical-gate tests for Module 05 ENRICHMENT (bin/enrichment.py).
-#   Encodes the APPROVED Piece C review invariants M05-1 .. M05-5 as runnable
-#   pytest checks, each paired with a negative control that proves the check has
-#   teeth. Most gates are pure Python; one exercises a live gseapy.prerank
-#   (guarded so it skips where gseapy is unavailable, in the style of
-#   tests/test_differential_abundance_r.py's dependency probe).
+#   Encodes the APPROVED Piece C review invariants M05-1 .. M05-5, plus gates
+#   M05-6 .. M05-11 added 2026-09-29 (GSEA gene_set_size, KNOWN_ISSUES E-9, and
+#   its follow-ups), as runnable pytest checks.
+#
+#   Teeth: M05-1 .. M05-5 pair each check with a negative control (a known-bad
+#   input the check must reject). M05-11 pairs its size-range and sort checks
+#   with negative controls; its exact-size and inclusive-bounds checks have none
+#   and their teeth were shown against the pre-change code and by mutation.
+#   M05-6's teeth were shown by running it against the pre-fix code. M05-7
+#   carries a second contract check, and M05-8, M05-9 and M05-10 carry fixture
+#   checks, named as such; their teeth were shown against the pre-change code
+#   (M05-7, M05-8, M05-9's collision test, M05-10) or by mutation (M05-9's
+#   case-variant test, which is green on the pre-change code because case does
+#   not change string length).
+#
+#   Scope split: this file pins empirical properties of real gseapy output and
+#   of the pipeline run through main(). Error branches and stubbed-gseapy
+#   behaviour live in tests/test_enrichment.py instead:
+#     - TestCountMatchedGenes       : every count_matched_genes branch (str/list
+#                                     blank rule, empty set, type, Tag % absent,
+#                                     unparseable and mismatched)
+#     - TestParseOraOverlap         : strict ORA 'Overlap' parsing
+#     - TestRunOraSizeFilter        : ORA size filter (incl. bounds), BH family,
+#                                     sorted overlap genes
+#     - TestRunGseaResultsStructure : run_gsea results-structure raises and Tag %
+#                                     forwarding
+#     - TestGseapyExceptionHandling : narrowed gseapy exception handling and
+#                                     short ranked lists
+#     - TestLoadParamsValidation    : gsea_permutations >= 1, min/max size
+#
+#   Live dependencies: this file requires gseapy to be installed. It imports
+#   enrichment at module level and enrichment imports gseapy at the top, so
+#   without gseapy collection fails for the whole file (the per-test
+#   importorskip calls never run). gseapy is a pinned hard dependency
+#   (environment.yml). M05-2 and M05-6 .. M05-11 call gseapy; M05-1, M05-3 and
+#   M05-5 do not, but still need it importable. No gate needs R:
+#   M05-4 and M05-11 block rpy2 so rrvgo takes its pure-Python null-column path
+#   (same monkeypatch trick as test_enrichment.py's degradation test).
 #
 #   Gate map:
 #     M05-1  ORA background identity (invariant)          -> TestOraBackgroundIdentity
@@ -20,12 +53,12 @@
 #     M05-3  in_significant_set decoupling (neg-control)  -> TestInSignificantSetDecoupling
 #     M05-4  rrvgo null-column contract (boundary)        -> TestClusterNullColumnContract
 #     M05-5  empty-run writes four outputs (boundary)     -> TestEmptyRunOutputs
-#
-#   The live rrvgo/R clustering call (M05-4) and any live gseapy call are not
-#   required: M05-4 forces the pure-Python null-init path by blocking rpy2 (same
-#   monkeypatch trick as test_enrichment.py's degradation test), and M05-1 /
-#   M05-5 avoid gseapy entirely. Only M05-2 runs gseapy.prerank and is skipped
-#   if gseapy is unavailable.
+#     M05-6  GSEA gene_set_size known answer (needs gseapy) -> TestGseaGeneSetSize
+#     M05-7  ORA size filter + BH family (needs gseapy)   -> TestOraSizeFilter
+#     M05-8  permutation_num=0 boundary (needs gseapy)    -> TestGseaNoPermutationBoundary
+#     M05-9  GSEA symbol-case metamorphic (needs gseapy)  -> TestGseaSymbolCase
+#     M05-10 ORA overlap_genes order stable (needs gseapy) -> TestOraOverlapGenesDeterministic
+#     M05-11 main() size invariant + stable row order    -> TestMainSizeInvariant
 #
 # inputs:
 #   None (tests build inputs in-memory / in tmp_path).
@@ -36,11 +69,12 @@
 # usage example:
 #   pytest tests/test_enrichment_gate.py -v
 #
-#   copy/paste: pytest tests/test_enrichment_gate.py -q
+#   copy/paste: pytest tests/test_enrichment_gate.py -v
 
 import sys
 import warnings
 from pathlib import Path
+from typing import ClassVar
 
 import numpy as np
 import pandas as pd
@@ -49,14 +83,13 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'bin'))
 
-import enrichment  # noqa: E402
-from enrichment import (  # noqa: E402
+import enrichment
+from enrichment import (
     build_protein_term_mapping,
     cluster_go_terms,
     prepare_gene_symbols,
     run_ora,
 )
-
 
 # ============================================================
 # M05-1: ORA background identity (invariant, local)
@@ -127,7 +160,7 @@ class TestOraBackgroundIdentity:
         da = self._da()
         contrast_df, _ = prepare_gene_symbols(da, 'KO_vs_WT')
         background_genes = contrast_df['gene_symbol'].tolist()
-        sig_genes = contrast_df[contrast_df['significant'] == True]['gene_symbol'].tolist()
+        sig_genes = contrast_df[contrast_df['significant'].eq(True)]['gene_symbol'].tolist()
         params = {'enrichment': {'fdr_threshold': 0.05}}
 
         run_ora(
@@ -249,6 +282,541 @@ class TestGseaNesSign:
 
 
 # ============================================================
+# M05-6: GSEA gene_set_size is a gene count (known answer, needs gseapy)
+# ============================================================
+
+class TestGseaGeneSetSize:
+    '''
+    GSEA gene_set_size must be the number of the term's genes present in the
+    ranked list (spec 05 Section 4.7), not the character length of gseapy's
+    ';'-joined matched_genes string (KNOWN_ISSUES E-9).
+
+    Symbols are mixed-case and multi-character (mouse-style), matching the real
+    input shape, so a character count can never coincide with the gene count.
+    Expected sizes are recomputed here from the GMT file and the ranked Series
+    (set intersection), independently of gseapy.
+
+    Teeth: the known-answer test was run against the pre-fix run_gsea
+    (2026-09-29) and failed with gene_set_size == 69 instead of 10.
+    Runs gseapy.prerank; skipped where gseapy is unavailable.
+    '''
+
+    _N_GENES = 60
+    _MIN_SIZE = 5
+    _MAX_SIZE = 100
+
+    # term -> member symbols. 'Absnt*' symbols are not in the ranked list.
+    _SETS: ClassVar[dict] = {
+        # 12 genes in the GMT, 10 in the ranked list -> expected size 10
+        'TERM_PARTIAL': [f'Prot{i:02d}' for i in range(10)] + ['Absnt01', 'Absnt02'],
+        # 20 genes, all ranked -> 20
+        'TERM_FULL': [f'Prot{i:02d}' for i in range(20, 40)],
+        # 8 genes, 6 ranked -> 6
+        'TERM_SMALL': [f'Prot{i:02d}' for i in range(50, 56)] + ['Absnt03', 'Absnt04'],
+        # 6 genes in the GMT but only 3 ranked -> below min_size after
+        # intersection, so gseapy must exclude it
+        'TERM_BELOW_MIN': ['Prot45', 'Prot46', 'Prot47', 'Absnt05', 'Absnt06', 'Absnt07'],
+    }
+
+    def _ranked(self) -> pd.Series:
+        genes = [f'Prot{i:02d}' for i in range(self._N_GENES)]
+        return pd.Series(np.linspace(5.0, -5.0, self._N_GENES), index=genes)
+
+    def _gmt(self, tmp_path: Path) -> str:
+        gmt = tmp_path / 'lib.gmt'
+        gmt.write_text(''.join(
+            f'{term}\tdescription\t' + '\t'.join(genes) + '\n'
+            for term, genes in self._SETS.items()
+        ))
+        return str(gmt)
+
+    def _params(self) -> dict:
+        return {'enrichment': {
+            'fdr_threshold': 0.05,
+            'min_gene_set_size': self._MIN_SIZE,
+            'max_gene_set_size': self._MAX_SIZE,
+            'gsea_permutations': 100,
+            'gsea_seed': 42,
+        }}
+
+    def _run(self, tmp_path: Path):
+        pytest.importorskip('gseapy')
+        from enrichment import run_gsea
+        with warnings.catch_warnings():
+            # Same local silencing as M05-2: gseapy warnings are not the subject.
+            warnings.simplefilter('ignore')
+            df, pre_res = run_gsea(self._ranked(), self._gmt(tmp_path),
+                                   'GO_BP', 'KO_vs_WT', self._params())
+        assert not df.empty
+        return df.set_index('term_id'), pre_res
+
+    def test_known_answer_partial_set(self, tmp_path):
+        df, _ = self._run(tmp_path)
+        assert int(df.loc['TERM_PARTIAL', 'gene_set_size']) == 10
+
+    def test_matches_independent_recomputation(self, tmp_path):
+        df, _ = self._run(tmp_path)
+        ranked = set(self._ranked().index)
+        for term, row in df.iterrows():
+            expected = len(set(self._SETS[term]) & ranked)
+            assert int(row['gene_set_size']) == expected, (
+                f'{term}: gene_set_size {row["gene_set_size"]} != {expected}'
+            )
+
+    def test_size_filter_applies_to_intersected_size(self, tmp_path):
+        df, _ = self._run(tmp_path)
+        assert 'TERM_BELOW_MIN' not in df.index
+        assert set(df.index) == {'TERM_PARTIAL', 'TERM_FULL', 'TERM_SMALL'}
+
+    def test_row_invariants(self, tmp_path):
+        df, pre_res = self._run(tmp_path)
+        tag_denominator = (
+            pre_res.res2d.set_index('Term')['Tag %']
+            .map(lambda s: int(str(s).split('/')[1]))
+        )
+        for term, row in df.iterrows():
+            size = int(row['gene_set_size'])
+            assert size == tag_denominator[term], f'{term}: disagrees with Tag %'
+            assert int(row['overlap_size']) <= size, f'{term}: leading edge > set'
+            assert self._MIN_SIZE <= size <= self._MAX_SIZE, f'{term}: outside size filter'
+
+
+# ============================================================
+# M05-7: ORA size filter and BH family (invariant, needs gseapy)
+# ============================================================
+
+def _bh(pvalues) -> np.ndarray:
+    '''Benjamini-Hochberg q-values, written out here independently of gseapy.'''
+    p = np.asarray(pvalues, dtype=float)
+    m = len(p)
+    order = np.argsort(p)
+    ranked = p[order] * m / np.arange(1, m + 1)
+    q_sorted = np.minimum.accumulate(ranked[::-1])[::-1]
+    q = np.empty(m)
+    q[order] = np.minimum(q_sorted, 1.0)
+    return q
+
+
+class TestOraSizeFilter:
+    '''
+    Spec 05 Section 4.5: ORA tests only terms whose size after intersection with
+    the background lies in [min_gene_set_size, max_gene_set_size], and BH runs
+    over those terms only. Sizes are checked against GMT & background computed
+    here, and q-values against an independent BH.
+
+    Second contract check (not a negative control): gseapy.enrich's own output
+    on the same input contains the out-of-range terms and a different q-value
+    for a kept term, so the filter and the BH recomputation both change the
+    result. It fails against the pre-change code, where run_ora returned
+    gseapy's output unfiltered.
+    '''
+
+    _BACKGROUND: ClassVar[list] = [f'Prot{i:02d}' for i in range(60)]
+    _SIG: ClassVar[list] = [f'Prot{i:02d}' for i in range(10)]
+    _MIN, _MAX = 5, 40
+    _SETS: ClassVar[dict] = {
+        # 24 in the GMT but only 4 in the background -> excluded (below min).
+        # Proves the filter uses the intersected size, not the GMT size.
+        'ORA_SMALL': [f'Prot{i:02d}' for i in range(4)] + [f'Absnt{i:02d}' for i in range(20)],
+        'ORA_OK': [f'Prot{i:02d}' for i in list(range(8)) + list(range(30, 42))],  # 20
+        'ORA_OK2': [f'Prot{i:02d}' for i in range(5, 15)],                          # 10
+        'ORA_BIG': [f'Prot{i:02d}' for i in range(50)],                             # 50 > max
+    }
+
+    def _gmt(self, tmp_path: Path) -> str:
+        gmt = tmp_path / 'ora.gmt'
+        gmt.write_text(''.join(f'{t}\tdesc\t' + '\t'.join(g) + '\n' for t, g in self._SETS.items()))
+        return str(gmt)
+
+    def _params(self, min_size: int, max_size: int) -> dict:
+        return {'enrichment': {'fdr_threshold': 0.05, 'min_gene_set_size': min_size,
+                               'max_gene_set_size': max_size}}
+
+    def _run_ora(self, tmp_path: Path, min_size: int, max_size: int) -> pd.DataFrame:
+        pytest.importorskip('gseapy')
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            out = run_ora(self._SIG, self._BACKGROUND, self._gmt(tmp_path), 'GO_BP',
+                          'KO_vs_WT', self._params(min_size, max_size))
+        return out.set_index('term_id')
+
+    def test_only_in_range_terms_tested(self, tmp_path):
+        out = self._run_ora(tmp_path, self._MIN, self._MAX)
+        assert set(out.index) == {'ORA_OK', 'ORA_OK2'}
+        background = set(self._BACKGROUND)
+        for term, row in out.iterrows():
+            assert int(row['gene_set_size']) == len(set(self._SETS[term]) & background)
+
+    def test_bh_over_filtered_family(self, tmp_path):
+        out = self._run_ora(tmp_path, self._MIN, self._MAX)
+        np.testing.assert_allclose(out['adj_pvalue'].to_numpy(), _bh(out['pvalue']))
+
+    def test_no_exclusion_matches_gseapy(self, tmp_path):
+        # Metamorphic: with a filter that excludes nothing, run_ora's q-values
+        # equal gseapy's own Adjusted P-value.
+        gseapy = pytest.importorskip('gseapy')
+        out = self._run_ora(tmp_path, 1, 10_000)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            raw = gseapy.enrich(gene_list=self._SIG, gene_sets=self._gmt(tmp_path),
+                                background=self._BACKGROUND, no_plot=True, verbose=False,
+                                cutoff=1.0).res2d.set_index('Term')
+        assert set(out.index) == set(raw.index)
+        np.testing.assert_allclose(out['adj_pvalue'], raw.loc[out.index, 'Adjusted P-value'])
+
+    def test_raw_pvalues_unchanged_by_filter(self, tmp_path):
+        # The filter changes only the BH family: each kept term's hypergeometric
+        # p-value equals gseapy's unfiltered P-value for the same term.
+        gseapy = pytest.importorskip('gseapy')
+        out = self._run_ora(tmp_path, self._MIN, self._MAX)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            raw = gseapy.enrich(gene_list=self._SIG, gene_sets=self._gmt(tmp_path),
+                                background=self._BACKGROUND, no_plot=True, verbose=False,
+                                cutoff=1.0).res2d.set_index('Term')
+        np.testing.assert_array_equal(out['pvalue'].to_numpy(),
+                                      raw.loc[out.index, 'P-value'].to_numpy())
+
+    def test_contract_filter_changes_gseapy_result(self, tmp_path):
+        gseapy = pytest.importorskip('gseapy')
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            raw = gseapy.enrich(gene_list=self._SIG, gene_sets=self._gmt(tmp_path),
+                                background=self._BACKGROUND, no_plot=True, verbose=False,
+                                cutoff=1.0).res2d.set_index('Term')
+        assert {'ORA_SMALL', 'ORA_BIG'} <= set(raw.index)
+        out = self._run_ora(tmp_path, self._MIN, self._MAX)
+        kept_q = out['adj_pvalue']
+        assert not np.allclose(kept_q, raw.loc[kept_q.index, 'Adjusted P-value'])
+
+
+# ============================================================
+# M05-8: permutation_num=0 boundary (needs gseapy)
+# ============================================================
+
+class TestGseaNoPermutationBoundary:
+    '''
+    With permutation_num=0 gseapy omits 'Tag %' from res2d, so the Tag % cross-
+    check in count_matched_genes is skipped and the gene split is the only
+    safeguard. ProSIFT rejects gsea_permutations < 1 in load_params, so this
+    calls gseapy.prerank directly: count_matched_genes must still return the
+    GMT & ranked-list size for every term.
+
+    Fixture check (not a negative control): on this fixture the pre-fix len()
+    of the raw string differs from the gene count, so a regression to len()
+    would fail the main check. The main check's teeth were shown by mutation
+    (len of the raw string), since count_matched_genes did not exist pre-fix.
+    '''
+
+    def _prerank(self, tmp_path: Path):
+        gseapy = pytest.importorskip('gseapy')
+        fixture = TestGseaGeneSetSize()
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            pre_res = gseapy.prerank(
+                rnk=fixture._ranked(), gene_sets=fixture._gmt(tmp_path), min_size=5,
+                max_size=100, permutation_num=0, ascending=False, no_plot=True,
+                verbose=False, seed=42, threads=1,
+            )
+        return fixture, pre_res
+
+    def test_tag_pct_absent_and_count_still_correct(self, tmp_path):
+        fixture, pre_res = self._prerank(tmp_path)
+        assert 'Tag %' not in pre_res.res2d.columns
+        ranked = set(fixture._ranked().index)
+        assert pre_res.results
+        for term, record in pre_res.results.items():
+            expected = len(set(fixture._SETS[term]) & ranked)
+            assert enrichment.count_matched_genes(term, record, tag_pct=None) == expected
+
+    def test_fixture_raw_string_length_differs_from_gene_count(self, tmp_path):
+        fixture, pre_res = self._prerank(tmp_path)
+        ranked = set(fixture._ranked().index)
+        record = pre_res.results['TERM_PARTIAL']
+        assert len(record['matched_genes']) != len(set(fixture._SETS['TERM_PARTIAL']) & ranked)
+
+
+# ============================================================
+# M05-9: GSEA symbol case (metamorphic, needs gseapy)
+# ============================================================
+
+class TestGseaSymbolCase:
+    '''
+    Symbol case must not change GSEA results when gseapy can match it: (a)
+    mixed-case ranked list + mixed-case GMT, (b) both upper-cased, and (c)
+    mixed-case ranked list + upper-case GMT (gseapy upper-cases the list) give
+    identical gene_set_size and NES per term. A ranked list holding two symbols
+    that differ only by case against an upper-case GMT must not produce a wrong
+    count: gseapy 1.1.13 matches the symbol once, so gene_set_size equals the
+    case-insensitive intersection.
+
+    Fixture check (not a negative control): a lower-cased ranked list against
+    the mixed-case GMT (no upper-casing applies) matches nothing, so gseapy
+    raises its "No gene sets passed" LookupError and run_gsea returns no rows
+    through that specific handled path. This shows case genuinely matters on
+    this fixture, so case_variants_agree is not trivially true.
+    '''
+
+    def _run(self, tmp_path: Path, ranked: pd.Series, sets: dict, name: str) -> pd.DataFrame:
+        pytest.importorskip('gseapy')
+        from enrichment import run_gsea
+        gmt = tmp_path / f'{name}.gmt'
+        gmt.write_text(''.join(f'{t}\tdesc\t' + '\t'.join(g) + '\n' for t, g in sets.items()))
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            df, _ = run_gsea(ranked, str(gmt), 'GO_BP', 'KO_vs_WT', TestGseaGeneSetSize()._params())
+        return df if df.empty else df.set_index('term_id')
+
+    def _fixture(self):
+        fixture = TestGseaGeneSetSize()
+        upper_sets = {t: [g.upper() for g in genes] for t, genes in fixture._SETS.items()}
+        return fixture._ranked(), fixture._SETS, upper_sets
+
+    def test_case_variants_agree(self, tmp_path):
+        ranked, sets, upper_sets = self._fixture()
+        base = self._run(tmp_path, ranked, sets, 'mixed')
+        upper = self._run(tmp_path, ranked.rename(str.upper), upper_sets, 'upper')
+        converted = self._run(tmp_path, ranked, upper_sets, 'converted')
+        assert not base.empty, 'no GSEA rows: the comparisons below would be vacuous'
+        for other in (upper, converted):
+            assert list(other.index) == list(base.index)
+            assert other['gene_set_size'].tolist() == base['gene_set_size'].tolist()
+            np.testing.assert_allclose(other['enrichment_score'], base['enrichment_score'])
+
+    def test_case_collision_counts_symbol_once(self, tmp_path):
+        ranked, _, upper_sets = self._fixture()
+        # 'PROT05' and 'Prot05' both ranked; the GMT holds PROT05 once.
+        collided = pd.concat([ranked, pd.Series([4.9], index=['PROT05'])]).sort_values(ascending=False)
+        out = self._run(tmp_path, collided, upper_sets, 'collision')
+        assert not out.empty, 'no GSEA rows: the loop below would assert nothing'
+        upper_ranked = {g.upper() for g in collided.index}
+        for term, row in out.iterrows():
+            assert int(row['gene_set_size']) == len(set(upper_sets[term]) & upper_ranked)
+
+    def test_fixture_unmatched_case_yields_no_terms(self, tmp_path):
+        ranked, sets, _ = self._fixture()
+        lowered = self._run(tmp_path, ranked.rename(str.lower), sets, 'lowered')
+        assert lowered.empty
+
+
+# ============================================================
+# M05-10: ORA overlap_genes order is reproducible (needs gseapy)
+# ============================================================
+
+_ORA_ORDER_SCRIPT = r'''
+import sys, warnings
+sys.path.insert(0, sys.argv[1])
+warnings.simplefilter('ignore')
+import gseapy, enrichment
+genes = [f'Prot{i:02d}' for i in range(60)]
+gmt = sys.argv[2]
+if sys.argv[3] == 'raw':
+    res = gseapy.enrich(gene_list=genes[:12], gene_sets=gmt, background=genes,
+                        no_plot=True, verbose=False, cutoff=1.0).res2d
+    print(res.sort_values('Term')['Genes'].tolist())
+else:
+    params = {'enrichment': {'fdr_threshold': 0.05, 'min_gene_set_size': 5,
+                             'max_gene_set_size': 100}}
+    out = enrichment.run_ora(genes[:12], genes, gmt, 'GO_BP', 'KO_vs_WT', params)
+    print(out.sort_values('term_id')['overlap_genes'].tolist())
+'''
+
+
+class TestOraOverlapGenesDeterministic:
+    '''
+    gseapy joins ORA overlap genes from a Python set, whose order depends on the
+    per-process string hash seed. run_ora sorts them, so two processes with
+    different PYTHONHASHSEED values write identical overlap_genes.
+
+    Fixture check (not a negative control): gseapy's raw Genes column differs between the same two
+    seeds, so the check would catch a missing sort.
+    '''
+
+    _SEEDS = ('1', '2')
+
+    def _gmt(self, tmp_path: Path) -> str:
+        genes = [f'Prot{i:02d}' for i in range(60)]
+        gmt = tmp_path / 'order.gmt'
+        gmt.write_text('ORDER_A\tdesc\t' + '\t'.join(genes[:20]) + '\n'
+                       + 'ORDER_B\tdesc\t' + '\t'.join(genes[4:30]) + '\n')
+        return str(gmt)
+
+    def _outputs(self, tmp_path: Path, mode: str) -> list:
+        import os
+        import subprocess
+        pytest.importorskip('gseapy')
+        bin_dir = str(Path(__file__).resolve().parent.parent / 'bin')
+        gmt = self._gmt(tmp_path)
+        outputs = []
+        for seed in self._SEEDS:
+            env = {**os.environ, 'PYTHONHASHSEED': seed}
+            proc = subprocess.run([sys.executable, '-c', _ORA_ORDER_SCRIPT, bin_dir, gmt, mode],
+                                  capture_output=True, text=True, env=env, check=True)
+            outputs.append(proc.stdout.strip().splitlines()[-1])
+        return outputs
+
+    def test_run_ora_output_identical_across_hash_seeds(self, tmp_path):
+        first, second = self._outputs(tmp_path, 'prosift')
+        assert first == second
+
+    def test_fixture_raw_gseapy_order_varies(self, tmp_path):
+        first, second = self._outputs(tmp_path, 'raw')
+        assert first != second
+
+
+# ============================================================
+# M05-11: main() size invariant across ORA and GSEA (needs gseapy)
+# ============================================================
+
+def _assert_size_invariants(res: pd.DataFrame, min_size: int, max_size: int) -> None:
+    '''
+    The property under test: every enrichment row, ORA and GSEA alike, has
+    min_size <= gene_set_size <= max_size and overlap_size <= gene_set_size.
+    Raises AssertionError naming the first offending row.
+    '''
+    for _, row in res.iterrows():
+        size, overlap = int(row['gene_set_size']), int(row['overlap_size'])
+        label = f"{row['analysis_type']} {row['term_id']}"
+        assert min_size <= size <= max_size, f'{label}: gene_set_size {size} outside [{min_size}, {max_size}]'
+        assert overlap <= size, f'{label}: overlap_size {overlap} > gene_set_size {size}'
+
+
+_ROW_KEY = ['contrast', 'library', 'analysis_type', 'term_id']
+
+
+def _assert_sorted_on_key(res: pd.DataFrame) -> None:
+    '''Rows are unique on _ROW_KEY and in ascending _ROW_KEY order.'''
+    keys = list(res[_ROW_KEY].itertuples(index=False, name=None))
+    assert len(set(keys)) == len(keys), 'row key is not unique'
+    assert keys == sorted(keys), 'rows are not sorted on the row key'
+
+
+class TestMainSizeInvariant:
+    '''
+    End to end through main(): with both ORA and GSEA enabled on a synthetic
+    Module 04 table, every row of the written enrichment_results.parquet obeys
+    the size invariant, both analyses are present, the out-of-range terms are
+    absent from both, and each size equals GMT & detected genes computed here.
+    This covers the wiring between run_ora/run_gsea and the written table.
+    Terms sitting exactly on min and max are kept by both analyses, and rows
+    are written sorted on _ROW_KEY. rpy2 is blocked so rrvgo takes its
+    null-column path (as in M05-4).
+
+    Negative controls: the size-range check rejects the written table with one
+    row's size pushed out of range, and the sort check rejects the rows
+    reversed. The exact-size and inclusive-bounds checks have no paired
+    control; they fail against the pre-change code and under mutation.
+    '''
+
+    _MIN, _MAX = 5, 30
+    _N = 80
+
+    def _genes(self) -> list:
+        return [f'Gm{i:03d}' for i in range(self._N)]
+
+    def _sets(self) -> dict:
+        g = self._genes()
+        return {
+            'SET_SMALL': g[:3] + [f'Absnt{i:02d}' for i in range(10)],  # 3 detected -> out
+            # Named so the alphabetical order (MID < TOP) is the reverse of
+            # gseapy's NES order (TOP, the top-ranked genes, has the higher NES).
+            # The sort test can then tell whether term_id is in the sort key.
+            'SET_TOP': g[:12],                                          # 12
+            'SET_MID': g[10:30],                                        # 20
+            'SET_BIG': g[:40],                                          # 40 -> out
+        }
+
+    def _write_inputs(self, tmp_path: Path, min_size: int, max_size: int) -> tuple:
+        genes = self._genes()
+        t_stat = np.linspace(6.0, -6.0, self._N)
+        da_df = pd.DataFrame({
+            'protein_id':       [f'P{i:03d}' for i in range(self._N)],
+            'gene_symbol':      genes,
+            'contrast':         'KO_vs_WT',
+            'significant':      [i < 15 for i in range(self._N)],
+            'log2_fc':          t_stat / 3,
+            'deqms_t':          t_stat,
+            'limma_t':          t_stat,
+            'deqms_pvalue':     np.linspace(1e-6, 0.9, self._N),
+            'limma_pvalue':     np.linspace(1e-6, 0.9, self._N),
+            'deqms_adj_pvalue': np.linspace(1e-4, 0.95, self._N),
+            'limma_adj_pvalue': np.linspace(1e-4, 0.95, self._N),
+        })
+        results_path = tmp_path / 'results.parquet'
+        da_df.to_parquet(results_path, index=False)
+        gmt_dir = tmp_path / 'gmt'
+        gmt_dir.mkdir()
+        (gmt_dir / 'm2.cp.reactome.v2026.1.Mm.symbols.gmt').write_text(''.join(
+            f'{t}\tdesc\t' + '\t'.join(g) + '\n' for t, g in self._sets().items()
+        ))
+        params = {'enrichment': {
+            'gene_set_libraries': ['gmt/m2.cp.reactome.v2026.1.Mm.symbols.gmt'],
+            'gsea_ranking': 't_statistic', 'run_ora': True, 'run_gsea': True,
+            'fdr_threshold': 0.05, 'min_gene_set_size': min_size,
+            'max_gene_set_size': max_size, 'plot_top_n': 5, 'plot_top_gsea_traces': 1,
+            'gsea_permutations': 100, 'gsea_seed': 42,
+        }}
+        params_path = tmp_path / 'params.yml'
+        params_path.write_text(yaml.safe_dump(params))
+        return results_path, params_path
+
+    def _run_main(self, tmp_path: Path, monkeypatch, min_size: int = _MIN,
+                  max_size: int = _MAX) -> pd.DataFrame:
+        pytest.importorskip('gseapy')
+        results_path, params_path = self._write_inputs(tmp_path, min_size, max_size)
+        outdir = tmp_path / 'out'
+        monkeypatch.setitem(sys.modules, 'rpy2', None)
+        monkeypatch.setitem(sys.modules, 'rpy2.robjects', None)
+        monkeypatch.setattr(sys, 'argv', [
+            'enrichment.py', '--results', str(results_path), '--params', str(params_path),
+            '--run-id', 'SIZERUN', '--outdir', str(outdir),
+        ])
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            enrichment.main()
+        return pd.read_parquet(outdir / 'SIZERUN.enrichment_results.parquet')
+
+    def test_every_row_within_size_filter(self, tmp_path, monkeypatch):
+        res = self._run_main(tmp_path, monkeypatch)
+        assert set(res['analysis_type']) == {'ORA', 'GSEA'}
+        _assert_size_invariants(res, self._MIN, self._MAX)
+        detected = set(self._genes())
+        for atype in ('ORA', 'GSEA'):
+            sub = res[res['analysis_type'] == atype].set_index('term_id')
+            assert set(sub.index) <= {'SET_TOP', 'SET_MID'}, f'{atype}: {set(sub.index)}'
+            for term, row in sub.iterrows():
+                assert int(row['gene_set_size']) == len(set(self._sets()[term]) & detected)
+
+    def test_size_bounds_inclusive_for_both_analyses(self, tmp_path, monkeypatch):
+        # SET_TOP has exactly 12 detected genes and SET_MID exactly 20: with
+        # [12, 20] both sit on a bound and must be kept by ORA and by GSEA.
+        res = self._run_main(tmp_path, monkeypatch, min_size=12, max_size=20)
+        for atype in ('ORA', 'GSEA'):
+            kept = set(res.loc[res['analysis_type'] == atype, 'term_id'])
+            assert kept == {'SET_TOP', 'SET_MID'}, f'{atype}: {kept}'
+
+    def test_written_rows_sorted_on_unique_key(self, tmp_path, monkeypatch):
+        # Byte-reproducible output: rows are written in a stable order on a
+        # unique key, so tied-NES terms cannot swap places between runs.
+        res = self._run_main(tmp_path, monkeypatch)
+        _assert_sorted_on_key(res)
+        csv = pd.read_csv(tmp_path / 'out' / 'SIZERUN.enrichment_results.csv')
+        assert csv[_ROW_KEY].astype(str).values.tolist() == res[_ROW_KEY].astype(str).values.tolist()
+
+    def test_negative_control_unsorted_rows_are_caught(self, tmp_path, monkeypatch):
+        res = self._run_main(tmp_path, monkeypatch)
+        with pytest.raises(AssertionError, match='not sorted'):
+            _assert_sorted_on_key(res.iloc[::-1].reset_index(drop=True))
+
+    def test_negative_control_out_of_range_row_is_caught(self, tmp_path, monkeypatch):
+        res = self._run_main(tmp_path, monkeypatch)
+        tampered = res.copy()
+        tampered.loc[tampered.index[0], 'gene_set_size'] = self._MAX + 1
+        with pytest.raises(AssertionError, match='outside'):
+            _assert_size_invariants(tampered, self._MIN, self._MAX)
+
+
+# ============================================================
 # M05-3: in_significant_set decoupling (negative-control, local)
 # ============================================================
 
@@ -289,7 +857,7 @@ class TestInSignificantSetDecoupling:
         ns_rows = out[out['term_id'] == 'TERM_NS']
         assert not ns_rows.empty
         # Decoupling: term is enrichment-significant, members are DA-non-significant.
-        assert (ns_rows['in_significant_set'] == False).all()
+        assert ns_rows['in_significant_set'].eq(False).all()
 
     def test_negative_control_significant_member_yields_true(self, tmp_path):
         '''
@@ -373,7 +941,7 @@ _ENRICHMENT_SCHEMA = [
     'term_id', 'term_name', 'library', 'analysis_type', 'contrast',
     'pvalue', 'adj_pvalue', 'enrichment_score', 'odds_ratio',
     'combined_score', 'gene_set_size', 'overlap_size', 'overlap_genes',
-    'cluster_id', 'is_representative', 'parent_term',
+    'gene_set_version', 'cluster_id', 'is_representative', 'parent_term',
 ]
 
 

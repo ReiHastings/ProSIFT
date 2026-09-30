@@ -3,7 +3,7 @@
 # Project:       ProSIFT (PROtein Statistical Integration and Filtering Tool)
 # Author:        Reina Hastings (reinahastings13@gmail.com)
 # Created:       2026-07-13
-# Last Modified: 2026-07-13
+# Last Modified: 2026-09-29
 # Purpose:       Module 08 Protein Database View (spec Section 4.1). A Shiny
 #                module rendering the sortable/filterable overview table of all
 #                proteins for the selected contrast, with click-through to a
@@ -51,6 +51,13 @@ mod_protein_db_server <- function(id, protein_data, enabled_dbs) {
 
     # Step 1: shape the raw query result into display columns. Kept separate
     # from the significance filter so the badge/format logic runs once.
+    # Orientation of the current contrast (constant across rows), used to label
+    # and colour the Direction column by group rather than bare up/down.
+    df_groups <- shiny::reactive({
+      df <- protein_data()
+      list(numerator = df$numerator[1], denominator = df$denominator[1])
+    })
+
     display_data <- shiny::reactive({
       df <- protein_data()
       shiny::req(df)
@@ -67,7 +74,7 @@ mod_protein_db_server <- function(id, protein_data, enabled_dbs) {
         `Protein name` = df$protein_name,
         `Adj p-value` = df$adj_pvalue,
         `log2 FC`    = df$log2_fc,
-        Direction    = ifelse(is.na(df$direction), 'ns', df$direction),
+        Direction    = direction_label(df$direction, df$numerator[1], df$denominator[1]),
         Detection    = df$detection_category,
         `% imputed`  = round(df$imputation_fraction * 100, 1),
         Diseases     = df$disease_count,
@@ -158,8 +165,7 @@ mod_protein_db_server <- function(id, protein_data, enabled_dbs) {
       # Direction badge colouring via text style (avoids raw HTML in the table).
       dt <- DT::formatStyle(
         dt, 'Direction', fontWeight = 'bold',
-        color = DT::styleEqual(c('up', 'down', 'ns'),
-                               c('#0F6E56', '#A32D2D', '#8A8F98'))
+        color = direction_style(df_groups()$numerator, df_groups()$denominator)
       )
       # Adjusted p-value: two significant figures, numeric sort preserved.
       dt <- DT::formatSignif(dt, 'Adj p-value', digits = 2)

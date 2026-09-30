@@ -3,7 +3,7 @@
 # Project:       ProSIFT (PROtein Statistical Integration and Filtering Tool)
 # Author:        Reina Hastings (reinahastings13@gmail.com)
 # Created:       2026-07-13
-# Last Modified: 2026-07-13
+# Last Modified: 2026-09-29
 # Purpose:       Module 08 frontend data-access layer. Opens read-only SQLite
 #                connections to a Module 07 results database and provides the
 #                query functions each view needs. All SQL lives here so the view
@@ -49,6 +49,51 @@ db_contrasts <- function(con) {
   DBI::dbGetQuery(
     con, 'SELECT DISTINCT contrast FROM differential_abundance ORDER BY contrast'
   )$contrast
+}
+
+#' Split 'numerator_vs_denominator' contrast labels on their FIRST '_vs_'.
+#'
+#' Same rule Module 04 uses to build the fit ('numerator - denominator'), so a
+#' positive log2 FC means higher in the numerator. Vectorised; a label without
+#' a usable '_vs_' yields NA for both parts. Used only as a fallback for results
+#' databases built before Module 04 wrote explicit numerator/denominator columns.
+split_contrast_label <- function(contrast) {
+  idx <- regexpr('_vs_', contrast, fixed = TRUE)
+  ok  <- !is.na(idx) & idx > 1 & (idx + 4L) <= nchar(contrast)
+  data.frame(
+    numerator   = ifelse(ok, substr(contrast, 1L, idx - 1L), NA_character_),
+    denominator = ifelse(ok, substr(contrast, idx + 4L, nchar(contrast)), NA_character_),
+    stringsAsFactors = FALSE
+  )
+}
+
+# TRUE when differential_abundance carries the explicit orientation columns.
+.da_has_orientation <- function(con) {
+  all(c('numerator', 'denominator') %in% DBI::dbListFields(con, 'differential_abundance'))
+}
+
+#' Orientation of one contrast: list(numerator, denominator).
+#'
+#' Prefers the Module 04 numerator/denominator columns (authoritative); falls
+#' back to splitting the label for older databases that lack them.
+db_contrast_groups <- function(con, contrast) {
+  if (.da_has_orientation(con)) {
+    g <- DBI::dbGetQuery(con, '
+      SELECT DISTINCT numerator, denominator FROM differential_abundance
+      WHERE contrast = ?', params = list(contrast))
+    if (nrow(g) == 1) return(list(numerator = g$numerator, denominator = g$denominator))
+  }
+  g <- split_contrast_label(contrast)
+  list(numerator = g$numerator, denominator = g$denominator)
+}
+
+# Append the contrast's numerator/denominator to a single-contrast result so a
+# view can label 'up'/'down' by group. Constant per call (one contrast).
+.with_orientation <- function(con, df, contrast) {
+  g <- db_contrast_groups(con, contrast)
+  df$numerator   <- rep(g$numerator,   nrow(df))
+  df$denominator <- rep(g$denominator, nrow(df))
+  df
 }
 
 
@@ -156,7 +201,7 @@ db_protein_table <- function(con, contrast) {
     ) pm ON pm.protein_id = p.protein_id
     ORDER BY (p.gene_symbol IS NULL OR p.gene_symbol = ''), p.gene_symbol
   )'
-  DBI::dbGetQuery(con, sql, params = list(contrast))
+  .with_orientation(con, DBI::dbGetQuery(con, sql, params = list(contrast)), contrast)
 }
 
 
@@ -191,7 +236,18 @@ db_protein_contrasts <- function(con, pid) {
     WHERE protein_id = ?
     ORDER BY contrast
   '
-  DBI::dbGetQuery(con, sql, params = list(pid))
+  out <- DBI::dbGetQuery(con, sql, params = list(pid))
+  # Attach each contrast's orientation so the view can say "higher in KO"
+  # instead of a bare "up" (whose meaning depends on the contrast order).
+  groups <- do.call(rbind, lapply(out$contrast, function(ct) {
+    g <- db_contrast_groups(con, ct)
+    data.frame(numerator = g$numerator, denominator = g$denominator,
+               stringsAsFactors = FALSE)
+  }))
+  if (is.null(groups)) {
+    groups <- data.frame(numerator = character(0), denominator = character(0))
+  }
+  cbind(out, groups)
 }
 
 #' Section 3 QC notes: for each sample the protein was OBSERVED in (non-imputed),
@@ -362,5 +418,7 @@ db_term_members <- function(con, term_id, contrast) {
     WHERE ptm.term_id = ? AND ptm.contrast = ?
     ORDER BY (ptm.gene_symbol IS NULL OR ptm.gene_symbol = ''), ptm.gene_symbol
   )'
-  DBI::dbGetQuery(con, sql, params = list(contrast, term_id, contrast))
+  .with_orientation(
+    con, DBI::dbGetQuery(con, sql, params = list(contrast, term_id, contrast)),
+    contrast)
 }

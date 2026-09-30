@@ -33,7 +33,7 @@ dependencies:
   - scikit-learn                      # Imputation (KNN, iterative)
 
   # --- Enrichment analysis (Phase 2) ---
-  - gseapy                            # ORA and GSEA via gseapy
+  - gseapy=1.1.13                     # ORA and GSEA; pinned: bin/enrichment.py validates its output structure against this version
   - bioconductor-rrvgo                # GO-term redundancy reduction (Module 05, Section 4.13)
   - bioconductor-gosemsim             # Semantic similarity backend for rrvgo
   - bioconductor-go.db                # GO term DAG + MSigDB name-to-GO-ID lookup

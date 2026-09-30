@@ -4,7 +4,7 @@ Title:         results_assembly.py
 Project:       ProSIFT (PROtein Statistical Integration and Filtering Tool)
 Author:        Reina Hastings (reinahastings13@gmail.com)
 Created:       2026-07-10
-Last Modified: 2026-07-13
+Last Modified: 2026-09-29
 Purpose:       Module 07 Results Assembly. The convergence point of the pipeline.
                Reads the Parquet/CSV outputs of the analytical spine (Modules
                01-05) and the database query layer (Module 06), assembles them
@@ -444,8 +444,8 @@ def write_csv_exports(data: dict, proteins: pd.DataFrame,
     sig_out = sig.merge(identity, on='protein_id', how='left')
     keep = [
         'protein_id', 'gene_symbol', 'human_ortholog_symbol', 'detection_category',
-        'contrast', 'log2_fc', 'deqms_pvalue', 'deqms_adj_pvalue', 'direction',
-        'significant',
+        'contrast', 'numerator', 'denominator', 'log2_fc', 'deqms_pvalue',
+        'deqms_adj_pvalue', 'direction', 'significant',
     ]
     keep = [c for c in keep if c in sig_out.columns]
     sig_out[keep].to_csv(outdir / f'{run_id}.significant_proteins.csv', index=False)

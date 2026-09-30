@@ -126,3 +126,20 @@ test_that('Wiring: a 0.10-run (from run_parameters) flags GOBP_Y as ORA-signific
     expect_true('GOBP_Y' %in% term_filtered()$term_id)
   })
 })
+
+
+# --- Member table Direction is labelled by group -------------------------------
+
+test_that('member table Direction reads "higher in <group>"', {
+  con <- fixture_con()
+  on.exit(close_results_db(con))
+  testServer(mod_bio_process_server,
+             args = list(con = reactive(con),
+                         contrast = reactive('KO_vs_WT'),
+                         selected_term = reactive('GOBP_X')), {
+    d <- member_display()
+    expect_true(nrow(d) > 0)
+    expect_false(any(d$Direction %in% c('up', 'down')))
+    expect_true(any(grepl('^higher in (KO|WT)$', d$Direction)))
+  })
+})

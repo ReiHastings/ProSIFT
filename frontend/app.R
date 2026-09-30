@@ -3,7 +3,7 @@
 # Project:       ProSIFT (PROtein Statistical Integration and Filtering Tool)
 # Author:        Reina Hastings (reinahastings13@gmail.com)
 # Created:       2026-07-13
-# Last Modified: 2026-07-13
+# Last Modified: 2026-09-29
 # Purpose:       Module 08 interactive frontend entry point. Builds the app
 #                shell (persistent top bar with run + contrast selectors, three
 #                tab views) and wires the Protein Database View to a read-only
@@ -55,7 +55,9 @@ ui <- shiny::fluidPage(
       shiny::div(
         class = 'contrast-bar',
         shiny::tags$label('Contrast:', `for` = 'contrast'),
-        shiny::selectInput('contrast', label = NULL, choices = NULL, width = '240px')
+        shiny::selectInput('contrast', label = NULL, choices = NULL, width = '240px'),
+        shiny::span(class = 'contrast-direction',
+                    shiny::textOutput('contrast_direction', inline = TRUE))
       ),
       mod_protein_db_ui('db')
     ),
@@ -69,6 +71,8 @@ ui <- shiny::fluidPage(
     # View 3: Biological process.
     shiny::tabPanel(
       'Biological process', value = 'process',
+      shiny::div(class = 'contrast-bar contrast-direction',
+                 shiny::textOutput('contrast_direction_process', inline = TRUE)),
       mod_bio_process_ui('process')
     )
   )
@@ -128,6 +132,17 @@ server <- function(input, output, session) {
     contrasts <- db_contrasts(con())
     shiny::updateSelectInput(session, 'contrast', choices = contrasts)
   })
+
+  # Step 3b: state the sign convention of the selected contrast wherever its
+  # statistics are shown, so "up" and positive NES are never read backwards.
+  contrast_direction <- shiny::reactive({
+    shiny::req(con(), input$contrast)
+    contrast_direction_text(db_contrast_groups(con(), input$contrast))
+  })
+  output$contrast_direction <- shiny::renderText(contrast_direction())
+  output$contrast_direction_process <- shiny::renderText(
+    sprintf('Contrast %s: %s', input$contrast, contrast_direction())
+  )
 
   # Step 4: app-owned navigation state. The currently viewed protein and term
   # are held here (not inside a view module) so any view can drive navigation --

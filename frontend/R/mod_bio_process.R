@@ -3,7 +3,7 @@
 # Project:       ProSIFT (PROtein Statistical Integration and Filtering Tool)
 # Author:        Reina Hastings (reinahastings13@gmail.com)
 # Created:       2026-07-14
-# Last Modified: 2026-07-14
+# Last Modified: 2026-09-29
 # Purpose:       Module 08 Biological Process View (spec Section 4.3). Two
 #                states in one tab: a sortable/filterable GO/Reactome term list
 #                (ORA + GSEA per contrast), and a term profile (identity,
@@ -255,7 +255,7 @@ mod_bio_process_server <- function(id, con, contrast, selected_term) {
         Gene       = m$gene_symbol,
         `log2 FC`  = m$log2_fc,
         `Adj p`    = m$adj_pvalue,
-        Direction  = ifelse(is.na(m$direction), 'ns', m$direction),
+        Direction  = direction_label(m$direction, m$numerator[1], m$denominator[1]),
         `In ORA set` = yn(m$in_significant_set),
         `Leading edge` = yn(m$is_leading_edge),
         check.names = FALSE, stringsAsFactors = FALSE)
@@ -273,9 +273,9 @@ mod_bio_process_server <- function(id, con, contrast, selected_term) {
       dt <- DT::formatSignif(dt, 'Adj p', digits = 2)
       dt <- DT::formatStyle(dt, 'log2 FC',
         color = DT::styleInterval(0, c('#A32D2D', '#0F6E56')))
+      g <- db_contrast_groups(con(), contrast())
       dt <- DT::formatStyle(dt, 'Direction', fontWeight = 'bold',
-        color = DT::styleEqual(c('up', 'down', 'ns'),
-                               c('#0F6E56', '#A32D2D', '#8A8F98')))
+        color = direction_style(g$numerator, g$denominator))
       dt
     }, server = TRUE)
 

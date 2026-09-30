@@ -3,7 +3,7 @@
 # Project:       ProSIFT (PROtein Statistical Integration and Filtering Tool)
 # Author:        Reina Hastings (reinahastings13@gmail.com)
 # Created:       2026-07-14
-# Last Modified: 2026-07-14
+# Last Modified: 2026-09-29
 # Purpose:       Small shared UI formatters and building blocks used by more
 #                than one Module 08 view module (profile card, biological
 #                process view): value formatters, coloured badges, stat cards,
@@ -36,10 +36,39 @@ clean_term_name <- function(x) {
 
 # --- Coloured badges (styling in prosift.css) -------------------------------
 
-dir_badge <- function(d) {
-  d <- if (is.na(d)) 'ns' else d
+# Relabel direction values by the group a protein is higher in ('up' ->
+# 'higher in KO', 'down' -> 'higher in WT'), so they read correctly whatever the
+# contrast order. Vectorised over `d`; NA direction -> 'ns'. Groups are scalars
+# (one contrast); if either is missing (NULL/NA/empty) the bare value is kept.
+direction_label <- function(d, numerator = NA, denominator = NA) {
+  d <- ifelse(is.na(d), 'ns', d)
+  known <- function(x) length(x) == 1 && !is.na(x) && nzchar(x)
+  if (!known(numerator) || !known(denominator)) return(d)
+  ifelse(d == 'up', paste('higher in', numerator),
+         ifelse(d == 'down', paste('higher in', denominator), d))
+}
+
+# DT styleEqual colours for direction_label() output: green / red / grey for
+# up / down / ns, keyed by whatever labels this contrast produces.
+direction_style <- function(numerator = NA, denominator = NA) {
+  DT::styleEqual(direction_label(c('up', 'down', 'ns'), numerator, denominator),
+                 c('#0F6E56', '#A32D2D', '#8A8F98'))
+}
+
+dir_badge <- function(d, numerator = NA, denominator = NA) {
+  d <- if (length(d) == 0 || is.na(d)) 'ns' else d
   cls <- switch(d, up = 'badge-up', down = 'badge-down', 'badge-ns')
-  shiny::span(class = paste('badge', cls), d)
+  shiny::span(class = paste('badge', cls), direction_label(d, numerator, denominator))
+}
+
+# Plain-language reading of a positive log2 FC / NES for one contrast, from the
+# list(numerator, denominator) returned by db_contrast_groups().
+contrast_direction_text <- function(groups) {
+  if (is.null(groups) || is.na(groups$numerator) || is.na(groups$denominator)) {
+    return('log2 FC > 0 and NES > 0 = higher in the first-named group')
+  }
+  sprintf('log2 FC > 0 and NES > 0 = higher in %s than %s',
+          groups$numerator, groups$denominator)
 }
 
 det_badge <- function(cat) {

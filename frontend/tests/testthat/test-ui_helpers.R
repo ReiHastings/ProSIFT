@@ -91,3 +91,37 @@ test_that('B5: sig_dots fills the ORA / GSEA dot only when significant', {
   expect_true(grepl('dot-empty', ora_only))
   expect_false(grepl('dot-gsea', ora_only))
 })
+
+
+# --- Direction labels follow the contrast's numerator -------------------------
+
+test_that('dir_badge names the group a protein is higher in', {
+  lab <- function(x) as.character(x$children[[1]])
+  expect_identical(lab(dir_badge('up', 'KO', 'WT')), 'higher in KO')
+  expect_identical(lab(dir_badge('down', 'KO', 'WT')), 'higher in WT')
+  expect_identical(lab(dir_badge('ns', 'KO', 'WT')), 'ns')
+  # Without groups the bare value is kept (backward-compatible call sites).
+  expect_identical(lab(dir_badge('up')), 'up')
+  expect_identical(lab(dir_badge(NA)), 'ns')
+})
+
+test_that('contrast_direction_text states the sign convention', {
+  expect_identical(
+    contrast_direction_text(list(numerator = 'KO', denominator = 'WT')),
+    'log2 FC > 0 and NES > 0 = higher in KO than WT')
+  expect_match(contrast_direction_text(list(numerator = NA, denominator = NA)),
+               'first-named group')
+})
+
+
+test_that('direction_label is vectorised and tolerates missing groups', {
+  expect_identical(direction_label(c('up', 'down', 'ns', NA), 'KO', 'WT'),
+                   c('higher in KO', 'higher in WT', 'ns', 'ns'))
+  expect_identical(direction_label(c('up', NA)), c('up', 'ns'))
+  # NULL / empty groups (e.g. a frame without the columns) fall back, no crash.
+  expect_identical(direction_label('down', NULL, NULL), 'down')
+  expect_identical(direction_label('down', character(0), 'WT'), 'down')
+  lab <- function(x) as.character(x$children[[1]])
+  expect_identical(lab(dir_badge('up', NULL, NULL)), 'up')
+  expect_identical(lab(dir_badge(NULL)), 'ns')
+})

@@ -4,7 +4,7 @@
 # author: Reina Hastings
 # contact: reinahastings13@gmail.com
 # date created: 2026-07-09
-# last modified: 2026-07-13
+# last modified: 2026-09-29
 #
 # purpose:
 #   Unit tests for Module 04 DIFFERENTIAL_ABUNDANCE (bin/differential_abundance.py).
@@ -59,6 +59,9 @@ from differential_abundance import (
     normalize_quarantine_samples,
     parse_and_validate_contrasts,
     parse_bool_param,
+    plot_ma,
+    plot_volcano,
+    split_contrast,
     summarize_peptide_counts,
     validate_quarantine,
     write_provenance,
@@ -208,9 +211,11 @@ class TestAssembleResults:
             'limma_t', 'limma_pvalue', 'limma_adj_pvalue',
             'deqms_t', 'deqms_pvalue', 'deqms_adj_pvalue',
             'n_peptides', 'significant', 'pvalue_undetermined',
-            'direction', 'contrast',
+            'direction', 'contrast', 'numerator', 'denominator',
         ]
         assert (out['contrast'] == 'KO_vs_WT').all()
+        assert (out['numerator'] == 'KO').all()
+        assert (out['denominator'] == 'WT').all()
         assert out.set_index('protein_id').loc['P1', 'n_peptides'] == 3
 
     def test_significance_and_direction_calls(self):
@@ -372,6 +377,7 @@ class TestWriteProvenance:
         assert 'WT=3' in text and 'KO=3' in text
         assert text.count('WT=') == 1               # only the 'full' n-per-group line
         assert 'robust=FALSE' in text
+        assert 'Benjamini-Hochberg (pinned explicitly)' in text
 
     def test_with_quarantine_records_both(self, tmp_path):
         write_provenance('RUN', tmp_path, ['WT-3'], 'quarantined',
@@ -523,3 +529,100 @@ class TestWriteSummaryDual:
         text = (tmp_path / 'RUN.diff_abundance_summary.txt').read_text()
         assert 'SENSITIVITY ANALYSIS' not in text
         assert 'PRIMARY =' not in text
+
+
+# ============================================================
+# CONTRAST ORIENTATION (numerator/denominator made explicit)
+# ============================================================
+
+class TestContrastOrientation:
+    '''
+    The fitted contrast is numerator - denominator, so 'up' / positive log2 FC
+    must be labelled as higher in the numerator everywhere it is reported.
+    '''
+
+    def test_split_contrast_first_vs(self):
+        assert split_contrast('KO_vs_WT') == ('KO', 'WT')
+        # Only the FIRST '_vs_' splits, matching parse_and_validate_contrasts.
+        assert split_contrast('A_vs_B_vs_C') == ('A', 'B_vs_C')
+
+    @pytest.mark.parametrize('bad', ['KOWT', '_vs_WT', 'KO_vs_'])
+    def test_split_contrast_rejects_malformed(self, bad):
+        with pytest.raises(ValueError):
+            split_contrast(bad)
+
+    def test_orientation_follows_label_not_run_order(self):
+        # The reversed label must flip the orientation columns (negative control
+        # for the schema test above, which only sees KO_vs_WT).
+        raw = TestAssembleResults()._deqms_raw()
+        out = assemble_results(raw, TestAssembleResults()._id_mapping(),
+                               _params(['WT_vs_KO']), 'DEqMS', 'WT_vs_KO')
+        assert (out['numerator'] == 'WT').all()
+        assert (out['denominator'] == 'KO').all()
+
+    def test_summary_states_direction(self, tmp_path):
+        # Build the tuple the way main() does (via parse_and_validate_contrasts
+        # -> split_contrast), so the test fails if the split is ever reversed.
+        (label, num, den, _), = parse_and_validate_contrasts(
+            _params(['KO_vs_WT']), ['KO', 'WT'])
+        primary = [(label, num, den, _summary_frame(3, 2))]
+        write_summary_txt(primary, 'WT_vs_KO_run', 'DEqMS',
+                          _params(['KO_vs_WT']), tmp_path)
+        text = (tmp_path / 'WT_vs_KO_run.diff_abundance_summary.txt').read_text()
+        assert 'log2 FC > 0 = higher in KO than WT' in text
+        assert 'Up (higher in KO):' in text
+        assert 'Down (higher in WT):' in text
+
+    def test_summary_rows_align_with_long_group_names(self, tmp_path):
+        # Production-length names must neither run into the value nor shift it.
+        primary = [('CTXcyto_KO_vs_CTXcyto_WT', 'CTXcyto_KO', 'CTXcyto_WT',
+                    _summary_frame(3, 2))]
+        write_summary_txt(primary, 'RUN', 'DEqMS',
+                          _params(['CTXcyto_KO_vs_CTXcyto_WT']), tmp_path)
+        lines = (tmp_path / 'RUN.diff_abundance_summary.txt').read_text().splitlines()
+        down = next(l for l in lines if l.startswith('  Down (higher in CTXcyto_WT):'))
+        assert 'CTXcyto_WT): ' in down                  # at least one space
+        short = [('KO_vs_WT', 'KO', 'WT', _summary_frame(3, 2))]
+        write_summary_txt(short, 'RUN2', 'DEqMS', _params(['KO_vs_WT']), tmp_path)
+        lines2 = (tmp_path / 'RUN2.diff_abundance_summary.txt').read_text().splitlines()
+        up  = next(l for l in lines2 if l.startswith('  Up (higher in KO):'))
+        sig = next(l for l in lines2 if l.startswith('Significant proteins:'))
+        # Short labels share the value column with the fixed-width rows (26).
+        assert up[26:27].isdigit() and sig[26:27].isdigit()
+
+    def test_plots_label_groups(self):
+        df = _summary_frame(2, 1)
+        vol = plot_volcano(df, 'KO_vs_WT', 'RUN', _params(['KO_vs_WT']))
+        ma  = plot_ma(df, 'KO_vs_WT', 'RUN', _params(['KO_vs_WT']))
+        assert 'higher in KO' in vol.layout.xaxis.title.text
+        assert 'higher in KO' in ma.layout.yaxis.title.text
+        # The full statement (both groups) is carried in the subtitle.
+        assert 'higher in KO than WT' in vol.layout.title.text
+        assert 'higher in KO than WT' in ma.layout.title.text
+        names = {t.name for t in vol.data}
+        assert {'Higher in KO', 'Higher in WT'} <= names
+
+
+
+# ============================================================
+# Section: BH pinned explicitly in the embedded R (handoff Piece C item 5)
+# ============================================================
+
+class TestBhPinnedInRSource:
+    '''
+    Static guard on the embedded R code (the fit itself needs R, see
+    tests/test_differential_abundance_r.py). DEqMS::outputResult() takes no
+    adjust.method, so BH must be re-applied with p.adjust on both adjusted
+    columns; limma::topTable must pass adjust.method = "BH". Numerical identity
+    with the package defaults was checked against DEqMS 1.28.0 on 2026-09-29.
+    '''
+
+    _SRC = (Path(__file__).resolve().parent.parent / 'bin'
+            / 'differential_abundance.py').read_text()
+
+    def test_toptable_pins_bh(self):
+        assert 'adjust.method = "BH"' in self._SRC
+
+    def test_deqms_columns_recomputed_with_bh(self):
+        assert 'res$adj.P.Val    <- stats::p.adjust(res$P.Value,     method = "BH")' in self._SRC
+        assert 'res$sca.adj.pval <- stats::p.adjust(res$sca.P.Value, method = "BH")' in self._SRC

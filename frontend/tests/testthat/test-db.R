@@ -356,3 +356,58 @@ test_that("db_enabled_dbs: empty array is all-disabled; JSON null fails open", {
   expect_null(db_enabled_dbs(c_null))
   expect_true(db_enabled('dgidb', db_enabled_dbs(c_null)))
 })
+
+
+# --- Contrast orientation (numerator/denominator) ------------------------------
+
+test_that('split_contrast_label splits on the first _vs_ and NAs malformed labels', {
+  g <- split_contrast_label(c('KO_vs_WT', 'A_vs_B_vs_C', 'KOWT', '_vs_WT', 'KO_vs_'))
+  expect_identical(g$numerator,   c('KO', 'A', NA, NA, NA))
+  expect_identical(g$denominator, c('WT', 'B_vs_C', NA, NA, NA))
+})
+
+test_that('db_contrast_groups falls back to the label on pre-orientation DBs', {
+  # The default fixture has no numerator/denominator columns (older schema).
+  con <- fixture_con(); on.exit(close_results_db(con))
+  expect_identical(db_contrast_groups(con, 'KO_vs_WT'),
+                   list(numerator = 'KO', denominator = 'WT'))
+})
+
+test_that('db_contrast_groups prefers the stored columns over the label', {
+  # Precedence probe: store values that differ from the label split, so the
+  # test can only pass if the columns are actually read.
+  p <- tempfile('fx_orient_', fileext = '.db')
+  build_fixture_db(p)
+  cw <- DBI::dbConnect(RSQLite::SQLite(), p)
+  DBI::dbExecute(cw, 'ALTER TABLE differential_abundance ADD COLUMN numerator TEXT')
+  DBI::dbExecute(cw, 'ALTER TABLE differential_abundance ADD COLUMN denominator TEXT')
+  DBI::dbExecute(cw, "UPDATE differential_abundance SET numerator = 'KOcol', denominator = 'WTcol'")
+  DBI::dbDisconnect(cw)
+  con <- open_results_db(p); on.exit(close_results_db(con))
+
+  expect_identical(db_contrast_groups(con, 'KO_vs_WT'),
+                   list(numerator = 'KOcol', denominator = 'WTcol'))
+  ct <- db_protein_contrasts(con, 'P1')
+  expect_identical(ct$numerator, c('KOcol', 'KOcol'))
+})
+
+test_that('db_protein_contrasts attaches orientation per contrast row', {
+  con <- fixture_con(); on.exit(close_results_db(con))
+  ct <- db_protein_contrasts(con, 'P1')          # AKO_vs_WT and KO_vs_WT rows
+  expect_identical(ct$numerator,   c('AKO', 'KO'))
+  expect_identical(ct$denominator, c('WT', 'WT'))
+  # A protein with no DA rows still returns a well-formed empty frame.
+  empty <- db_protein_contrasts(con, 'P6')
+  expect_equal(nrow(empty), 0)
+  expect_true(all(c('numerator', 'denominator') %in% names(empty)))
+})
+
+
+test_that('single-contrast queries carry the contrast orientation', {
+  con <- fixture_con(); on.exit(close_results_db(con))
+  tab <- db_protein_table(con, 'KO_vs_WT')
+  expect_true(all(tab$numerator == 'KO') && all(tab$denominator == 'WT'))
+  mem <- db_term_members(con, 'GOBP_X', 'KO_vs_WT')
+  expect_true(nrow(mem) > 0)
+  expect_true(all(mem$numerator == 'KO') && all(mem$denominator == 'WT'))
+})

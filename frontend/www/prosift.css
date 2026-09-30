@@ -48,6 +48,7 @@
 }
 .contrast-bar label { margin-bottom: 0; font-weight: 600; }
 .contrast-bar .form-group { margin-bottom: 0; }
+.contrast-direction { color: #555; font-size: 0.9em; }
 
 .view-controls {
   display: flex;

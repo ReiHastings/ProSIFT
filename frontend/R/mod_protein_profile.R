@@ -3,7 +3,7 @@
 # Project:       ProSIFT (PROtein Statistical Integration and Filtering Tool)
 # Author:        Reina Hastings (reinahastings13@gmail.com)
 # Created:       2026-07-14
-# Last Modified: 2026-07-14
+# Last Modified: 2026-09-29
 # Purpose:       Module 08 Protein Profile View (spec Section 4.2). The
 #                per-protein 'baseball card': nine sections consolidating
 #                differential abundance, data-quality/QC-flag notes, UniProt
@@ -168,13 +168,14 @@ mod_protein_profile_server <- function(id, con, selected_protein) {
             class = if (!is.na(ct$log2_fc) && ct$log2_fc < 0) 'val-down' else 'val-up',
             fmt_fc(ct$log2_fc))),
           stat_card('adj. p-value (DEqMS)', fmt_p(ct$adj_pvalue)),
-          stat_card('direction', dir_badge(ct$direction)),
+          stat_card('direction', dir_badge(ct$direction, ct$numerator, ct$denominator)),
           stat_card('contrast', ct$contrast))
       } else {
         capped_table(ct, c('Contrast', 'log2 FC', 'Adj p', 'Direction'),
           function(r) list(
             shiny::tags$td(r$contrast), shiny::tags$td(fmt_fc(r$log2_fc)),
-            shiny::tags$td(fmt_p(r$adj_pvalue)), shiny::tags$td(dir_badge(r$direction))),
+            shiny::tags$td(fmt_p(r$adj_pvalue)),
+            shiny::tags$td(dir_badge(r$direction, r$numerator, r$denominator))),
           cap = 50L)
       }
 

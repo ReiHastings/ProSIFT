@@ -4,12 +4,12 @@ Title:         differential_abundance.py
 Project:       ProSIFT (PROtein Statistical Integration and Filtering Tool)
 Author:        Reina Hastings (reinahastings13@gmail.com)
 Created:       2026-03-30
-Last Modified: 2026-07-13
+Last Modified: 2026-09-29
 Purpose:       Module 04 DIFFERENTIAL_ABUNDANCE process. Parses and validates
                contrasts from params.yml, fits a linear model per protein using
                limma empirical Bayes (trend=TRUE) via rpy2, applies DEqMS
                peptide-count-aware variance correction, and produces a per-protein
-               results table (15 columns), a plain-text summary, and volcano / MA
+               results table (17 columns), a plain-text summary, and volcano / MA
                diagnostic plots (static PNG + interactive HTML) for each contrast.
                Supports optional mean-shift sample quarantine with dual
                (primary/sensitivity) reporting (Section 4.9 of the module spec).
@@ -234,6 +234,37 @@ def is_syntactic_r_name(name: str) -> bool:
     return bool(_R_SYNTACTIC_NAME.match(name)) and name not in _R_RESERVED_WORDS
 
 
+def split_contrast(contrast_user: str) -> tuple[str, str]:
+    """
+    Split a 'numerator_vs_denominator' contrast label into its two group names.
+
+    Splits on the FIRST '_vs_' (so a denominator may itself contain '_vs_').
+    The fitted contrast is 'numerator - denominator', so a positive log2 fold
+    change always means higher abundance in the numerator group. This is the
+    single source of truth for that orientation; every direction label written
+    by this module is derived from it.
+    """
+    idx = contrast_user.find("_vs_")
+    if idx == -1:
+        raise ValueError(
+            f"Contrast '{contrast_user}' does not contain '_vs_' delimiter. "
+            "Use format 'numerator_vs_denominator' (e.g., 'KO_vs_WT')."
+        )
+    numerator   = contrast_user[:idx]
+    denominator = contrast_user[idx + 4:]
+    if not numerator or not denominator:
+        raise ValueError(
+            f"Contrast '{contrast_user}': numerator or denominator is empty after "
+            "splitting on '_vs_'."
+        )
+    return numerator, denominator
+
+
+def direction_statement(numerator: str, denominator: str) -> str:
+    """Plain-language reading of a positive log2 fold change for one contrast."""
+    return f"log2 FC > 0 = higher in {numerator} than {denominator}"
+
+
 def parse_and_validate_contrasts(
     params: dict,
     available_groups: list[str],
@@ -293,20 +324,7 @@ def parse_and_validate_contrasts(
     parsed: list[tuple[str, str, str, str]] = []
     for contrast_user in raw_contrasts:
         # Split on first _vs_ to handle (unlikely) group names containing '_vs_'
-        idx = contrast_user.find("_vs_")
-        if idx == -1:
-            raise ValueError(
-                f"Contrast '{contrast_user}' does not contain '_vs_' delimiter. "
-                "Use format 'numerator_vs_denominator' (e.g., 'KO_vs_WT')."
-            )
-        numerator   = contrast_user[:idx]
-        denominator = contrast_user[idx + 4:]
-
-        if not denominator:
-            raise ValueError(
-                f"Contrast '{contrast_user}': denominator is empty after "
-                "splitting on '_vs_'."
-            )
+        numerator, denominator = split_contrast(contrast_user)
 
         # Membership is checked against the samples-present groups, so a group
         # that exists in the metadata but contributes no samples to this run is
@@ -456,6 +474,8 @@ def write_provenance(
         f"Date:                {now}",
         f"Method:              {method_used}  "
         f"(eBayes trend=TRUE, robust={'TRUE' if robust_ebayes else 'FALSE'})",
+        "Multiple testing:    Benjamini-Hochberg (pinned explicitly), applied "
+        "within each contrast",
         "",
     ]
     if quarantine_samples:
@@ -635,9 +655,17 @@ def _run_one_contrast_r(
                 fit3$count <- as.integer(prosift_pep_counts)
                 fit4 <- DEqMS::spectraCounteBayes(fit3)
                 res  <- DEqMS::outputResult(fit4, coef_col = 1)
+                # Pin BH explicitly. outputResult() has no adjust.method argument:
+                # adj.P.Val inherits the topTable default and sca.adj.pval is
+                # hardcoded inside DEqMS. Recomputing here makes the method
+                # independent of either package's defaults (bit-identical to
+                # DEqMS 1.28.0 output; p.adjust excludes NA p-values from n).
+                res$adj.P.Val    <- stats::p.adjust(res$P.Value,     method = "BH")
+                res$sca.adj.pval <- stats::p.adjust(res$sca.P.Value, method = "BH")
             }} else {{
                 # sort.by="none" preserves protein order (rowname alignment)
-                res  <- limma::topTable(fit3, number = Inf, sort.by = "none", coef = 1)
+                res  <- limma::topTable(fit3, number = Inf, sort.by = "none", coef = 1,
+                                        adjust.method = "BH")
             }}
             res$protein_id <- rownames(res)
             res
@@ -688,11 +716,17 @@ def assemble_results(
     Map R column names to the ProSIFT output schema, add gene_symbol,
     compute significance and direction, and attach the contrast label.
 
-    Output schema (15 columns):
+    Output schema (17 columns):
         protein_id, gene_symbol, log2_fc, avg_abundance,
         limma_t, limma_pvalue, limma_adj_pvalue,
         deqms_t, deqms_pvalue, deqms_adj_pvalue,
-        n_peptides, significant, pvalue_undetermined, direction, contrast
+        n_peptides, significant, pvalue_undetermined, direction, contrast,
+        numerator, denominator
+
+    `numerator` and `denominator` make the sign self-describing: log2_fc and
+    direction='up' mean higher in `numerator`. They are carried per row so the
+    orientation survives any downstream export that drops the contrast label's
+    naming convention (for example a run_id whose group order is reversed).
     """
     da_cfg      = params.get("differential_abundance", {})
     sig_cfg     = da_cfg.get("significance", {})
@@ -787,8 +821,9 @@ def assemble_results(
 
     out["direction"] = out.apply(_direction, axis=1)
 
-    # --- Contrast label ---
+    # --- Contrast label + explicit orientation ---
     out["contrast"] = contrast_user
+    out["numerator"], out["denominator"] = split_contrast(contrast_user)
 
     # --- Canonical column order ---
     col_order = [
@@ -798,6 +833,7 @@ def assemble_results(
         "deqms_t", "deqms_pvalue", "deqms_adj_pvalue",
         "n_peptides",
         "significant", "pvalue_undetermined", "direction", "contrast",
+        "numerator", "denominator",
     ]
     out = out[col_order]
 
@@ -807,6 +843,15 @@ def assemble_results(
 # ============================================================
 # SUMMARY TEXT
 # ============================================================
+
+def _summary_row(label: str, value: str, width: int = 26) -> str:
+    """
+    Left-align `label` to the summary's value column (26 chars, matching the
+    fixed-width rows around it), always leaving at least one space so a long
+    group name never runs into its value.
+    """
+    return f"{label:<{width - 1}} {value}"
+
 
 def write_summary_txt(
     contrast_results: list[tuple[str, str, str, pd.DataFrame]],
@@ -880,6 +925,8 @@ def write_summary_txt(
         lines += [
             "----------------------------------------",
             f"CONTRAST: {contrast_user}  ({numerator} - {denominator})",
+            f"Direction:  {direction_statement(numerator, denominator)}; "
+            f"'up' = higher in {numerator}, 'down' = higher in {denominator}",
             "----------------------------------------",
             "",
             "INPUT",
@@ -916,8 +963,8 @@ def write_summary_txt(
             "RESULTS",
             "----------------------------------------",
             f"Significant proteins:     {n_sig} / {n_proteins} ({pct_sig}%)",
-            f"  Up-regulated:           {n_up} ({pct_up}%)",
-            f"  Down-regulated:         {n_down} ({pct_down}%)",
+            _summary_row(f"  Up (higher in {numerator}):", f"{n_up} ({pct_up}%)"),
+            _summary_row(f"  Down (higher in {denominator}):", f"{n_down} ({pct_down}%)"),
             f"Not significant:          {n_ns}",
             f"  p-value undetermined:   {n_undet} (NaN adjusted p-value; not significant)",
             "",
@@ -967,7 +1014,7 @@ def write_summary_txt(
             lines += [
                 f"CONTRAST: {contrast_user}  ({numerator} - {denominator})",
                 f"  Significant proteins:   {n_sig} / {n_proteins} ({pct}%)  "
-                f"[{n_up} up, {n_down} down]{undet_note}",
+                f"[{n_up} up in {numerator}, {n_down} up in {denominator}]{undet_note}",
                 "",
             ]
 
@@ -1029,7 +1076,9 @@ def plot_volcano(
         traces[direction]["y"].append(float(neg_log_p[row.name]))
         traces[direction]["text"].append(hover)
 
-    label_map = {"up": "Up-regulated", "down": "Down-regulated", "ns": "Not significant"}
+    numerator, denominator = split_contrast(contrast_user)
+    label_map = {"up": f"Higher in {numerator}", "down": f"Higher in {denominator}",
+                 "ns": "Not significant"}
     fig = go.Figure()
     for direction in ("ns", "down", "up"):   # ns drawn first (background)
         d = traces[direction]
@@ -1056,8 +1105,11 @@ def plot_volcano(
         fig.add_vline(x=-fc_thresh, line_dash="dash", line_color="#888888", line_width=1)
 
     fig.update_layout(
-        title=f"Volcano Plot: {contrast_user}  ({run_id})",
-        xaxis_title="log2 Fold Change",
+        # Short axis title (fits at 700 px with long group names); the full
+        # orientation statement lives in the subtitle line.
+        title=(f"Volcano Plot: {contrast_user}  ({run_id})<br>"
+               f"<sup>{direction_statement(numerator, denominator)}</sup>"),
+        xaxis_title=f"log2 FC (> 0 = higher in {numerator})",
         yaxis_title=f"-log10({primary_col})",
         height=560,
         width=700,
@@ -1107,7 +1159,9 @@ def plot_ma(
         traces[direction]["y"].append(float(row["log2_fc"]))
         traces[direction]["text"].append(hover)
 
-    label_map = {"up": "Up-regulated", "down": "Down-regulated", "ns": "Not significant"}
+    numerator, denominator = split_contrast(contrast_user)
+    label_map = {"up": f"Higher in {numerator}", "down": f"Higher in {denominator}",
+                 "ns": "Not significant"}
     fig = go.Figure()
     for direction in ("ns", "down", "up"):
         d = traces[direction]
@@ -1131,9 +1185,10 @@ def plot_ma(
         fig.add_hline(y=-fc_thresh, line_dash="dash", line_color="#888888", line_width=1)
 
     fig.update_layout(
-        title=f"MA Plot: {contrast_user}  ({run_id})",
+        title=(f"MA Plot: {contrast_user}  ({run_id})<br>"
+               f"<sup>{direction_statement(numerator, denominator)}</sup>"),
         xaxis_title="Average log2 Abundance (AveExpr)",
-        yaxis_title="log2 Fold Change",
+        yaxis_title=f"log2 FC (> 0 = higher in {numerator})",
         height=520,
         width=700,
         legend_title_text="Direction",

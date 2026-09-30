@@ -141,6 +141,8 @@ def _diff_abundance_frame():
         'significant': [True, False, True, True, False],
         'direction': ['up', 'ns', 'up', 'down', 'ns'],
         'contrast': ['KO_vs_WT'] * 5,
+        'numerator': ['KO'] * 5,
+        'denominator': ['WT'] * 5,
     })
 
 
@@ -531,3 +533,19 @@ def test_csv_exports_written(assembled_db):
     assert set(sig['protein_id']) == {'P1', 'P3', 'P4'}
     # Significant export carries identity columns joined from proteins.
     assert 'gene_symbol' in sig.columns and 'detection_category' in sig.columns
+
+
+
+def test_orientation_columns_reach_db_and_csv(assembled_db):
+    # The numerator/denominator columns make the log2_fc sign self-describing;
+    # they must survive into both the SQLite table and the significant export.
+    db_path, outdir = assembled_db
+    conn = sqlite3.connect(db_path)
+    rows = conn.execute(
+        'SELECT DISTINCT contrast, numerator, denominator FROM differential_abundance'
+    ).fetchall()
+    conn.close()
+    assert rows == [('KO_vs_WT', 'KO', 'WT')]
+    sig = pd.read_csv(outdir / 'SYN_RUN.significant_proteins.csv')
+    assert {'numerator', 'denominator'} <= set(sig.columns)
+    assert (sig['numerator'] == 'KO').all() and (sig['denominator'] == 'WT').all()

@@ -140,3 +140,18 @@ test_that('Fix 2b: disabled Diseases/PubMed columns use the n/q render (AC3)', {
   expect_false(grepl('n/q', render_blob(c('disgenet', 'dgidb', 'pubmed')),
                      fixed = TRUE))
 })
+
+
+# --- Direction column is labelled by group, not bare up/down -----------------
+
+test_that('Direction column reads "higher in <group>"', {
+  testServer(mod_protein_db_server,
+             args = list(protein_data = reactive(.pdb_table),
+                         enabled_dbs = reactive(NULL)), {
+    dd <- display_data()
+    expect_true(all(dd$Direction %in% c('higher in KO', 'higher in WT', 'ns')))
+    # Fixture KO_vs_WT: P1 up -> higher in KO; P4 down -> higher in WT.
+    expect_identical(dd$Direction[dd$protein_id == 'P1'], 'higher in KO')
+    expect_identical(dd$Direction[dd$protein_id == 'P4'], 'higher in WT')
+  })
+})

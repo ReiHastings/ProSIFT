@@ -4,14 +4,16 @@
 # author: Reina Hastings
 # contact: reinahastings13@gmail.com
 # date created: 2026-03-26
-# last modified: 2026-03-26
+# last modified: 2026-09-29
 #
 # purpose:
 #   Module 01, Processes 4.1-4.3. Validates the abundance matrix and metadata
 #   file for a single ProSIFT run, then cross-validates sample IDs between them.
 #   Produces validated Parquet outputs containing only the matched working set of
 #   samples, and a partial validation report (to be concatenated with reports from
-#   subsequent processes).
+#   subsequent processes). Also records the sign convention of every contrast
+#   and warns when the run_id names its groups in the opposite order from a
+#   contrast (a labeling hazard: the run name then reads backwards).
 #
 # inputs:
 #   --abundance  : master abundance CSV (protein_id + abundance + peptide_count cols)
@@ -34,6 +36,7 @@
 #       --outdir    results/CTXcyto_WT_vs_CTXcyto_KO/validation
 
 import argparse
+import re
 import sys
 import os
 from datetime import datetime
@@ -539,6 +542,106 @@ def validate_metadata(
 
 
 # ============================================================
+# Contrast orientation check (labeling hazard, warn only)
+# ============================================================
+
+def _split_vs(label: str) -> tuple[str, str] | None:
+    '''Split on the first '_vs_' (Module 04's rule); None if not splittable.'''
+    idx = label.find('_vs_')
+    if idx <= 0 or idx + 4 >= len(label):
+        return None
+    return label[:idx], label[idx + 4:]
+
+
+# Name segments inside one '_'-separated run_id token: an upper-case acronym
+# directly followed by lower case splits off ('CTXcyto' -> CTX, cyto), a
+# Capitalised word stays whole ('Area2' -> Area, 2), digits split off
+# ('WT2' -> WT, 2). Keeping 'Area' whole is what stops a one-letter group 'A'
+# from matching it.
+_NAME_SEGMENT = re.compile(r'[A-Z]{2,}(?=[a-z])|[A-Z]?[a-z]+|[A-Z]+|[0-9]+')
+
+
+def _side_group(side: str, groups: tuple[str, str]) -> str | None:
+    '''
+    Return which of the two contrast groups one side of a run_id names.
+
+    Case-insensitive. A group equal to a whole '_' token scores 2, equal to a
+    segment of a token scores 1. The best-scoring group wins; a tie (both or
+    neither mentioned) returns None. Scoring whole tokens above segments
+    resolves nested names: in 'WT2', group 'WT2' (token) beats 'WT' (segment).
+    '''
+    tokens = [t for t in side.split('_') if t]
+    whole = {t.casefold() for t in tokens}
+    parts = {seg.casefold() for t in tokens for seg in _NAME_SEGMENT.findall(t)}
+
+    def score(g: str) -> int:
+        g = g.casefold()
+        return 2 if g in whole else (1 if g in parts else 0)
+
+    a, b = (score(g) for g in groups)
+    if a == b:
+        return None
+    return groups[0] if a > b else groups[1]
+
+
+def run_id_order_reversed(run_id: str, numerator: str, denominator: str) -> bool:
+    '''
+    Return True when run_id names the contrast groups in the reverse order.
+
+    run_id is a free-form label, so each side of its first '_vs_' is matched
+    to a group by name parts (see _side_group), not raw substrings: 'A' does
+    not match 'Area2', but 'CTX' matches 'CTXcyto'. The check fires only when
+    the LEFT side unambiguously names the denominator AND the RIGHT side the
+    numerator. Anything it cannot interpret returns False, so it is designed
+    to miss an odd name rather than raise a false warning.
+
+    Example: run_id 'CTXcyto_WT_vs_CTXcyto_KO' with contrast 'KO_vs_WT' -> True.
+    '''
+    sides = _split_vs(run_id)
+    if sides is None:
+        return False
+    groups = (numerator, denominator)
+    left, right = sides
+    return (_side_group(left, groups) == denominator
+            and _side_group(right, groups) == numerator)
+
+
+def check_contrast_orientation(run_id: str, params: dict, report: Report) -> None:
+    '''
+    Record how each contrast's sign reads, and warn on a reversed run_id.
+
+    Module 04 fits 'numerator - denominator' for each 'numerator_vs_denominator'
+    entry in design.contrasts, so positive log2 FC / NES = higher in the
+    numerator. The run_id plays no role in the statistics, but readers often take
+    its group order as the direction; a reversed order is a warning, not an
+    error, because the results are correct and only the label misleads.
+    Malformed contrasts are left to Module 04, which rejects them with context.
+    '''
+    report.section('CONTRAST ORIENTATION')
+    # 'design:' present but empty parses to None, so guard both levels.
+    contrasts = (params.get('design') or {}).get('contrasts') or []
+    for contrast in contrasts:
+        parts = _split_vs(str(contrast))
+        if parts is None:
+            report.info(f'{contrast}: not in numerator_vs_denominator form '
+                        '(Module 04 will reject it)')
+            continue
+        numerator, denominator = parts
+        report.info(f'{contrast}: positive log2 FC / NES = higher in '
+                    f'{numerator} than {denominator}')
+        if run_id_order_reversed(run_id, numerator, denominator):
+            msg = (
+                f"run_id '{run_id}' names the groups in the opposite order from "
+                f"contrast '{contrast}'. Positive log2 FC / NES means higher in "
+                f"{numerator}, NOT in the first group of the run name. Results "
+                f"are correct; rename the run (numerator first) or check every "
+                f"directional claim against the contrast."
+            )
+            report.warn(msg)
+            print(f'WARNING [{run_id}]: {msg}', file=sys.stderr)
+
+
+# ============================================================
 # Process 4.3 -- Cross-Validate Samples
 # ============================================================
 
@@ -711,6 +814,9 @@ def main() -> None:
 
     # --- Process 4.3: Cross-validate ---
     matrix, metadata = cross_validate(matrix, metadata, params, report)
+
+    # --- Contrast orientation (warn-only labeling check) ---
+    check_contrast_orientation(run_id, params, report)
 
     # --- Summary ---
     report.section('VALIDATION SUMMARY')

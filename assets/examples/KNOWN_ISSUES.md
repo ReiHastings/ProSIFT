@@ -161,6 +161,10 @@ that enrichment output from the example is a smoke test, not a meaningful result
 
 ### E-9. Module 05 reports `gene_set_size` as a character count
 
+**Status (2026-09-29): fixed in code** (`count_matched_genes` in `bin/enrichment.py`;
+tests M05-6 and `TestCountMatchedGenes`). Existing cluster outputs still need
+regeneration; see the handoff task. The line numbers below refer to the pre-fix code.
+
 `bin/enrichment.py:404-410`:
 
 ```python
@@ -220,13 +224,19 @@ reviewed statically only and have **never been executed**.
 
 ### E-16. The docs describe a pipeline shape that does not currently exist
 
-`workflows/prosift.nf` has Modules 06 and 07 commented out in the working tree
-with `[stop-before-DB]` markers (lines 160, 167, 174, 181, 188, 247-267), and
-five `ch_db_*_input` channels are built and never consumed.
+**Resolved 2026-09-29.** The uncommitted `[stop-before-DB]` edits to
+`workflows/prosift.nf` were reverted, so the working tree again matches the
+committed pipeline: the five `QUERY_*` calls (Module 06) and the
+`RESULTS_ASSEMBLY` join and call (Module 07) are active, and every
+`ch_db_*_input` channel is consumed. The README and test-profile comments,
+which assume Module 06 runs, are consistent with the pipeline again.
 
-These edits predate the examples work and are Rei's. The README and test-profile
-comments were written against a pipeline in which Module 06 runs. Resolve the
-`[stop-before-DB]` state before either is committed.
+Not yet verified by a run: no stub or test-profile execution has confirmed the
+restored Module 06/07 wiring against the current process signatures.
+
+Original finding: `workflows/prosift.nf` had Modules 06 and 07 commented out in
+the working tree with `[stop-before-DB]` markers, leaving five `ch_db_*_input`
+channels built but never consumed.
 
 ### E-17. Vendor mapping caveats
 
