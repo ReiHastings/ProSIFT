@@ -76,6 +76,31 @@ workflow PROSIFT {
         return resolved
     }
 
+    // --- GMT libraries for ENRICHMENT (Module 05) ---
+    // enrichment.gene_set_libraries is read from each run's params.yml here and
+    // the files are passed to ENRICHMENT as staged path inputs, so the task
+    // never opens a host path named inside params.yml. This keeps the shipped
+    // example portable (relative GMT path), works in containers, and makes
+    // -resume re-run enrichment when a GMT's content changes. Relative entries
+    // resolve against the params.yml's own directory, the same rule
+    // enrichment.py applies in standalone use.
+    def resolve_gmts = { params_yml, String run_id ->
+        def cfg  = new org.yaml.snakeyaml.Yaml().load(params_yml.text)
+        def libs = (cfg instanceof Map) ? cfg.enrichment?.gene_set_libraries : null
+        if( !(libs instanceof List) || libs.isEmpty() )
+            error "Run '${run_id}': enrichment.gene_set_libraries in ${params_yml} is missing or empty."
+        def params_dir = params_yml.toAbsolutePath().parent
+        return libs.collect { raw ->
+            def p = raw.toString().trim()
+            // URLs (s3://, https://) and absolute paths are used as given.
+            def gmt = ( p.contains('://') || new File(p).isAbsolute() ) ? file(p) : file(params_dir.resolve(p))
+            if( !gmt.exists() )
+                error "Run '${run_id}': gene set library not found at ${gmt}\n" +
+                      "  (params.yml value: '${p}'; relative paths resolve against ${params_dir})"
+            return gmt
+        }
+    }
+
     Channel
         .fromPath(params.samplesheet, checkIfExists: true)
         .splitCsv(header: true)
@@ -103,8 +128,8 @@ workflow PROSIFT {
             impute_params:    [ meta, params_yml ]
             // da_params: params_yml for the DIFFERENTIAL_ABUNDANCE join
             da_params:        [ meta, params_yml ]
-            // enrich_params: params_yml for the ENRICHMENT join
-            enrich_params:    [ meta, params_yml ]
+            // enrich_params: params_yml + resolved GMT files for the ENRICHMENT join
+            enrich_params:    [ meta, params_yml, resolve_gmts(params_yml, meta.run_id) ]
             // Module 06: one branch per database process
             db_uniprot_params:  [ meta, params_yml ]
             db_pubmed_params:   [ meta, params_yml ]
@@ -229,9 +254,8 @@ workflow PROSIFT {
     DIFFERENTIAL_ABUNDANCE(ch_da_input)
 
     // --- Module 05: Enrichment Analysis ---
-    // Joins: diff_abundance_results (DIFFERENTIAL_ABUNDANCE) + params_yml
-    // GMT library paths are resolved from params.yml (not Nextflow file() staging)
-    // so no additional path inputs are needed in the channel.
+    // Joins: diff_abundance_results (DIFFERENTIAL_ABUNDANCE) + params_yml +
+    // GMT files (resolved from params.yml by resolve_gmts, staged as inputs).
     DIFFERENTIAL_ABUNDANCE.out.results_table
         .join(ch_input.enrich_params)
         .set { ch_enrich_input }

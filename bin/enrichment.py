@@ -15,6 +15,9 @@ Purpose:       Module 05 ENRICHMENT process. Runs overrepresentation analysis (O
 Inputs:
   --results      {run_id}.diff_abundance_results.parquet  (Module 04 DIFFERENTIAL_ABUNDANCE)
   --params       {run_id}_params.yml
+  --gene-set-libraries  GMT files staged by Nextflow, in params.yml order
+                 (optional; when omitted, enrichment.gene_set_libraries paths
+                 are resolved relative to the params.yml directory)
 Outputs:
   {run_id}.enrichment_results.parquet
   {run_id}.enrichment_results.csv
@@ -28,6 +31,7 @@ Usage:
                 --params CTXcyto_WT_vs_CTXcyto_KO_params.yml \
                 --run-id CTXcyto_WT_vs_CTXcyto_KO \
                 --outdir .
+  (Nextflow adds: --gene-set-libraries gmt/1/m5.go.bp.v2026.1.Mm.symbols.gmt ...)
 """
 
 import argparse
@@ -74,6 +78,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--params",   required=True, help="Run params.yml")
     parser.add_argument("--run-id",   required=True, dest="run_id", help="Run identifier prefix for output files")
     parser.add_argument("--outdir",   required=True, help="Output directory")
+    parser.add_argument(
+        "--gene-set-libraries", nargs="+", default=None, dest="gene_set_libraries",
+        metavar="GMT",
+        help=("GMT files staged by Nextflow, one per enrichment.gene_set_libraries "
+              "entry and in the same order. Overrides the params.yml paths, which "
+              "are then only used to check the order. Omit for standalone runs."),
+    )
     return parser.parse_args()
 
 
@@ -149,8 +160,15 @@ def _file_sha256(path: str) -> str:
 # PARAMETER LOADING
 # ============================================================
 
-def load_params(params_path: str) -> dict:
-    """Load and validate enrichment parameters from params.yml."""
+def load_params(params_path: str, staged_libraries: list[str] | None = None) -> dict:
+    """
+    Load and validate enrichment parameters from params.yml.
+
+    staged_libraries: GMT paths staged by Nextflow (--gene-set-libraries). When
+    given, they replace the params.yml paths, which must match them one-to-one
+    by position and filename. When None (standalone use), params.yml paths are
+    resolved relative to the params.yml directory.
+    """
     params_dir = Path(params_path).parent.resolve()
 
     with open(params_path) as fh:
@@ -159,22 +177,44 @@ def load_params(params_path: str) -> dict:
     enr = params.get("enrichment", {})
 
     # Required: gene_set_libraries must be a list of paths.
-    # Paths are resolved relative to the params.yml file's directory so that
-    # relative paths work the same way during standalone testing (where the
-    # working directory may differ from the run directory) and during Nextflow
-    # execution (where the params.yml is staged into the work directory).
+    # Standalone: paths are resolved relative to the params.yml file's
+    # directory, so relative paths do not depend on the working directory.
+    # Nextflow: the workflow applies the same rule to find the files, stages
+    # them into the task, and passes them via --gene-set-libraries (the staged
+    # params.yml symlink's directory is the work dir, where they do not exist).
     libraries = enr.get("gene_set_libraries", [])
     if not libraries:
         logging.error("params.yml: enrichment.gene_set_libraries is empty or missing. "
                       "Provide at least one GMT file path.")
         sys.exit(1)
     resolved = []
-    for p in libraries:
-        resolved_p = Path(p) if Path(p).is_absolute() else (params_dir / p).resolve()
-        if not resolved_p.exists():
-            logging.error("Gene set library not found: %s (resolved from %s)", resolved_p, p)
+    if staged_libraries is not None:
+        # Nextflow path: the workflow read this same list and staged each file
+        # under gmt/<index>/<original filename>, so the params.yml path need not
+        # exist inside the task. Check the pairing so a misordered or
+        # mismatched list fails here instead of mislabelling a library.
+        if len(staged_libraries) != len(libraries):
+            logging.error("--gene-set-libraries has %d file(s) but params.yml lists %d. "
+                          "They must correspond one-to-one.",
+                          len(staged_libraries), len(libraries))
             sys.exit(1)
-        resolved.append(str(resolved_p))
+        for staged, entry in zip(staged_libraries, libraries, strict=True):
+            staged_p = Path(staged).absolute()
+            if staged_p.name != Path(entry).name:
+                logging.error("Staged GMT '%s' does not match params.yml entry '%s' "
+                              "(filenames differ; order must match).", staged_p.name, entry)
+                sys.exit(1)
+            if not staged_p.exists():
+                logging.error("Staged gene set library not found: %s", staged_p)
+                sys.exit(1)
+            resolved.append(str(staged_p))
+    else:
+        for p in libraries:
+            resolved_p = Path(p) if Path(p).is_absolute() else (params_dir / p).resolve()
+            if not resolved_p.exists():
+                logging.error("Gene set library not found: %s (resolved from %s)", resolved_p, p)
+                sys.exit(1)
+            resolved.append(str(resolved_p))
     enr["gene_set_libraries"] = resolved
 
     # Defaults with explicit type coercion
@@ -1498,7 +1538,7 @@ def main() -> None:
     logging.info("=" * 60)
 
     # --- Load inputs ---
-    params = load_params(args.params)
+    params = load_params(args.params, staged_libraries=args.gene_set_libraries)
     enr = params["enrichment"]
 
     logging.info("Loading Module 04 results: %s", args.results)

@@ -611,6 +611,83 @@ class TestLoadParamsValidation:
                                     max_gene_set_size=sizes[1]))
 
 
+
+class TestLoadParamsStagedLibraries:
+    '''
+    GMT resolution (KNOWN_ISSUES E-4). Standalone: relative entries resolve
+    against the params.yml directory. Nextflow: --gene-set-libraries supplies
+    the staged files, which replace the params.yml paths after a one-to-one
+    (count, order, filename) check.
+    '''
+
+    def _params(self, tmp_path, libraries) -> str:
+        import yaml
+        path = tmp_path / 'params.yml'
+        path.write_text(yaml.safe_dump({'enrichment': {'gene_set_libraries': libraries}}))
+        return str(path)
+
+    def _gmt(self, directory, name) -> Path:
+        directory.mkdir(parents=True, exist_ok=True)
+        gmt = directory / name
+        gmt.write_text('TERM\tdesc\tSyt1\n')
+        return gmt
+
+    def test_relative_entry_resolves_against_params_dir(self, tmp_path, monkeypatch):
+        from enrichment import load_params
+        gmt = self._gmt(tmp_path, 'example_gene_sets.gmt')
+        monkeypatch.chdir(tmp_path.parent)   # cwd must not matter
+        enr = load_params(self._params(tmp_path, ['example_gene_sets.gmt']))['enrichment']
+        assert enr['gene_set_libraries'] == [str(gmt.resolve())]
+
+    def test_staged_files_replace_unreachable_params_paths(self, tmp_path, monkeypatch):
+        # Inside a Nextflow task the params.yml path does not exist; only the
+        # staged copy does.
+        from enrichment import load_params
+        work = tmp_path / 'work'
+        staged = self._gmt(work / 'gmt' / '1', 'm5.go.bp.v2026.1.Mm.symbols.gmt')
+        params = self._params(tmp_path, ['/nonexistent/m5.go.bp.v2026.1.Mm.symbols.gmt'])
+        monkeypatch.chdir(work)
+        enr = load_params(params, staged_libraries=['gmt/1/m5.go.bp.v2026.1.Mm.symbols.gmt'])
+        assert enr['enrichment']['gene_set_libraries'] == [str(staged.absolute())]
+
+    def test_staged_order_preserved(self, tmp_path):
+        from enrichment import load_params
+        a = self._gmt(tmp_path / 'gmt' / '1', 'a.gmt')
+        b = self._gmt(tmp_path / 'gmt' / '2', 'b.gmt')
+        enr = load_params(self._params(tmp_path, ['x/a.gmt', 'y/b.gmt']),
+                          staged_libraries=[str(a), str(b)])['enrichment']
+        assert [Path(p).name for p in enr['gene_set_libraries']] == ['a.gmt', 'b.gmt']
+
+    def test_staged_count_mismatch_exits(self, tmp_path):
+        from enrichment import load_params
+        a = self._gmt(tmp_path / 'gmt' / '1', 'a.gmt')
+        with pytest.raises(SystemExit):
+            load_params(self._params(tmp_path, ['a.gmt', 'b.gmt']), staged_libraries=[str(a)])
+
+    def test_staged_order_swapped_exits(self, tmp_path):
+        # NEGATIVE CONTROL: a misordered list would silently swap library labels.
+        from enrichment import load_params
+        a = self._gmt(tmp_path / 'gmt' / '1', 'a.gmt')
+        b = self._gmt(tmp_path / 'gmt' / '2', 'b.gmt')
+        with pytest.raises(SystemExit):
+            load_params(self._params(tmp_path, ['a.gmt', 'b.gmt']),
+                        staged_libraries=[str(b), str(a)])
+
+    def test_staged_missing_file_exits(self, tmp_path):
+        from enrichment import load_params
+        with pytest.raises(SystemExit):
+            load_params(self._params(tmp_path, ['a.gmt']),
+                        staged_libraries=[str(tmp_path / 'gmt' / '1' / 'a.gmt')])
+
+    def test_shipped_example_params_has_no_absolute_gmt_path(self):
+        # E-4 regression guard: the example must not pin a machine-specific path.
+        import yaml
+        example = Path(__file__).resolve().parent.parent / 'assets' / 'examples' / 'minimal'
+        libs = yaml.safe_load((example / 'params.yml').read_text())['enrichment']['gene_set_libraries']
+        for entry in libs:
+            assert not Path(entry).is_absolute(), entry
+            assert (example / entry).exists(), entry
+
 class TestGseapyExceptionHandling:
     '''
     run_ora has no try/except around gseapy.enrich (empty results come back as

@@ -6,6 +6,12 @@
  * MSigDB GMT files. Produces a unified enrichment results table, a protein-term
  * mapping table, lollipop plots (PNG + HTML) per contrast per library, GSEA
  * running score plots (PNG) for top significant terms, and a summary text file.
+ *
+ * GMT libraries are staged inputs (gene_set_libraries), resolved by the
+ * workflow from enrichment.gene_set_libraries in params.yml. Each is staged as
+ * gmt/<index>/<original filename>: the index keeps same-named files from
+ * colliding, and the original filename is kept because enrichment.py derives
+ * the library short name and the MSigDB version from it.
  */
 
 nextflow.enable.dsl = 2
@@ -19,7 +25,8 @@ process ENRICHMENT {
     input:
     tuple val(meta),
           path(diff_abundance_results),
-          path(params_yml)
+          path(params_yml),
+          path(gene_set_libraries, stageAs: 'gmt/?/*')
 
     output:
     tuple val(meta), path("*.enrichment_results.parquet"),      emit: enrichment_results
@@ -37,12 +44,17 @@ process ENRICHMENT {
     tuple val(meta), path("*.gsea_running_score.*.png"), emit: gsea_running_score_png, optional: true
 
     script:
+    // gene_set_libraries is interpolated directly: Nextflow then renders the
+    // staged files space-separated, in params.yml order, and shell-escapes
+    // each name. Do not pre-join or quote (join() drops the escaping; quoting
+    // makes the escape backslash literal). Verified with a space in a name.
     """
     enrichment.py \\
         --results ${diff_abundance_results} \\
         --params  ${params_yml} \\
         --run-id  ${meta.run_id} \\
-        --outdir  .
+        --outdir  . \\
+        --gene-set-libraries ${gene_set_libraries}
     """
 
     stub:

@@ -62,7 +62,20 @@ before shipping it. Do not assume an accession pattern is unassigned.
 
 ### E-4. `params.yml` hardcodes an absolute path into the author's home directory
 
-`assets/examples/minimal/params.yml` writes the GMT path as
+**Resolved 2026-09-30.** GMT libraries are now staged as ENRICHMENT inputs: the
+workflow (`workflows/prosift.nf`, `resolve_gmts`) reads
+`enrichment.gene_set_libraries` from each run's params.yml, resolves relative
+entries against the params.yml's directory, and passes the files to
+ENRICHMENT, which hands the staged copies to `enrichment.py` via the new
+`--gene-set-libraries` option. The example and its generator now write the
+relative path `example_gene_sets.gmt`, and re-running the generator after
+cloning is no longer required. Verified with a `-profile test -stub` run (GMT
+staged under `gmt/1/`), a Nextflow render check of the real process script
+(one and three GMTs, a space in a filename, two same-named files), and an
+end-to-end `enrichment.py` run in a simulated task directory. Not yet verified
+by a full non-stub run: the example still stops at Module 01 (E-1).
+
+Original finding: `assets/examples/minimal/params.yml` wrote the GMT path as
 `/Users/reina/Library/Mobile Documents/.../example_gene_sets.gmt`.
 `bin/enrichment.py:145-151` calls `sys.exit(1)` when the library is missing, so
 enrichment fails for every other user and on the cluster.

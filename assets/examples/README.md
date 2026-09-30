@@ -72,10 +72,9 @@ The CSVs are committed so they can be read without running Python, but they are
 generated artifacts. Retune effect sizes by editing `EFFECTS` and re-running,
 never by hand-editing the CSVs.
 
-**You must re-run the generator after cloning to a new path.** `params.yml`
-holds an absolute path to the GMT, because `enrichment.py` reads
-`gene_set_libraries` directly at runtime and Nextflow does not stage those files.
-Everything else uses relative paths.
+All paths are relative, so the example works from any clone location. The
+GMT path in `params.yml` resolves against the `params.yml` directory, and the
+workflow stages the file into the ENRICHMENT task.
 
 ## The .xlsx template
 
