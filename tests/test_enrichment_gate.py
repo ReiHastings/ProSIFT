@@ -10,8 +10,10 @@
 #   Permanent empirical-gate tests for Module 05 ENRICHMENT (bin/enrichment.py).
 #   Encodes the APPROVED Piece C review invariants M05-1 .. M05-5, plus gates
 #   M05-6 .. M05-11 added 2026-09-29 (GSEA gene_set_size, KNOWN_ISSUES E-9, and
-#   its follow-ups), and M05-12 added 2026-09-30 (gene_set_version per row,
-#   paired with a negative control), as runnable pytest checks.
+#   its follow-ups), M05-12 added 2026-09-30 (gene_set_version per row,
+#   paired with a negative control), and M05-13 added 2026-10-01 (the shipped
+#   rrvgo R block run through Rscript), as runnable pytest checks. M05-4 was
+#   rewritten 2026-10-01 for the cluster_status contract.
 #
 #   Teeth: M05-1 .. M05-5 pair each check with a negative control (a known-bad
 #   input the check must reject). M05-11 pairs its size-range and sort checks
@@ -44,15 +46,16 @@
 #   without gseapy collection fails for the whole file (the per-test
 #   importorskip calls never run). gseapy is a pinned hard dependency
 #   (environment.yml). M05-2 and M05-6 .. M05-11 call gseapy; M05-1, M05-3 and
-#   M05-5 do not, but still need it importable. No gate needs R:
-#   M05-4 and M05-11 block rpy2 so rrvgo takes its pure-Python null-column path
+#   M05-5 do not, but still need it importable. Only M05-13 needs R (Rscript
+#   with rrvgo, GO.db, org.Mm.eg.db; marked slow, skipped without Rscript).
+#   M05-4 and M05-11 block rpy2 so rrvgo takes its pure-Python degradation path
 #   (same monkeypatch trick as test_enrichment.py's degradation test).
 #
 #   Gate map:
 #     M05-1  ORA background identity (invariant)          -> TestOraBackgroundIdentity
 #     M05-2  GSEA NES sign (metamorphic, needs gseapy)    -> TestGseaNesSign
 #     M05-3  in_significant_set decoupling (neg-control)  -> TestInSignificantSetDecoupling
-#     M05-4  rrvgo null-column contract (boundary)        -> TestClusterNullColumnContract
+#     M05-4  rrvgo cluster_status contract (invariant)    -> TestClusterContract
 #     M05-5  empty-run writes four outputs (boundary)     -> TestEmptyRunOutputs
 #     M05-6  GSEA gene_set_size known answer (needs gseapy) -> TestGseaGeneSetSize
 #     M05-7  ORA size filter + BH family (needs gseapy)   -> TestOraSizeFilter
@@ -60,6 +63,7 @@
 #     M05-9  GSEA symbol-case metamorphic (needs gseapy)  -> TestGseaSymbolCase
 #     M05-10 ORA overlap_genes order stable (needs gseapy) -> TestOraOverlapGenesDeterministic
 #     M05-11 main() size invariant + stable row order    -> TestMainSizeInvariant
+#     M05-13 shipped rrvgo R block via Rscript (slow, R) -> TestClusterLiveRBlock
 #
 # inputs:
 #   None (tests build inputs in-memory / in tmp_path).
@@ -86,6 +90,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'bin'))
 
 import enrichment
 from enrichment import (
+    CLUSTER_STATUSES,
+    _annotate_cluster_unit,
     build_protein_term_mapping,
     cluster_go_terms,
     prepare_gene_symbols,
@@ -971,7 +977,7 @@ class TestInSignificantSetDecoupling:
 
 
 # ============================================================
-# M05-4: rrvgo null-column contract (boundary, local)
+# M05-4: rrvgo cluster_status contract (invariant, local)
 # ============================================================
 
 def _assert_rowcount_preserved(inp: pd.DataFrame, out: pd.DataFrame) -> None:
@@ -984,13 +990,72 @@ def _assert_rowcount_preserved(inp: pd.DataFrame, out: pd.DataFrame) -> None:
     )
 
 
-class TestClusterNullColumnContract:
+def _assert_cluster_contract(out: pd.DataFrame) -> None:
     '''
-    cluster_go_terms must preserve row count and add cluster_id /
-    is_representative / parent_term. An unresolvable GO term AND any Reactome
-    term end with all three columns NA and still appear in the results. We
-    exercise the pure-Python framing/null-init path by blocking rpy2 so the lazy
-    import fails (graceful degradation), rather than invoking live rrvgo/R.
+    The rrvgo output contract (spec Section 4.13). Raises AssertionError if any
+    clause fails:
+      1. cluster_status is non-null and in the vocabulary; non-GO rows are
+         'not_go_library'.
+      2. cluster_id is non-null exactly for 'clustered' rows.
+      3. is_representative is non-null, so a representatives-only filter can
+         never silently drop a row through NA.
+      4. Unclustered rows are their own representative (True, no parent_term).
+      5. Per (library, analysis_type, contrast, cluster_id): exactly one
+         representative, it has the lowest adj_pvalue, and every other member's
+         parent_term is its term_id.
+      6. GSEA clusters never mix NES signs.
+    '''
+    status = out['cluster_status']
+    assert status.notna().all(), 'cluster_status has nulls'
+    assert set(status) <= set(CLUSTER_STATUSES), f'unknown statuses: {set(status) - set(CLUSTER_STATUSES)}'
+    non_go = ~out['library'].isin(['GO_BP', 'GO_MF', 'GO_CC'])
+    assert (status[non_go] == 'not_go_library').all(), 'non-GO row with a GO status'
+
+    clustered = status == 'clustered'
+    assert (out['cluster_id'].notna() == clustered).all(), 'cluster_id set iff clustered violated'
+    assert out['is_representative'].notna().all(), 'is_representative has nulls'
+
+    unclustered = out[~clustered]
+    assert unclustered['is_representative'].astype(bool).all(), 'unclustered row not its own representative'
+    assert unclustered['parent_term'].isna().all(), 'unclustered row has a parent_term'
+
+    keys = ['library', 'analysis_type', 'contrast', 'cluster_id']
+    for key, members in out[clustered].groupby(keys):
+        reps = members[members['is_representative'].astype(bool)]
+        assert len(reps) == 1, f'cluster {key}: {len(reps)} representatives'
+        rep = reps.iloc[0]
+        if members['adj_pvalue'].notna().any():   # all-NaN cluster: any member may represent it
+            assert rep['adj_pvalue'] <= members['adj_pvalue'].min(), f'cluster {key}: representative not most significant'
+        others = members[~members['is_representative'].astype(bool)]
+        assert (others['parent_term'] == rep['term_id']).all(), f'cluster {key}: parent_term mismatch'
+        if key[1] == 'GSEA':
+            signs = set(np.sign(members['enrichment_score'].astype(float)))
+            assert len(signs) == 1, f'cluster {key}: mixes NES signs {signs}'
+
+
+def _contract_frame() -> pd.DataFrame:
+    '''A valid post-clustering table: one ORA cluster, one up and one down GSEA cluster, unclustered rows.'''
+    return pd.DataFrame({
+        'library':        ['GO_BP', 'GO_BP', 'GO_BP', 'GO_BP', 'GO_BP', 'GO_BP', 'GO_BP', 'REACTOME'],
+        'analysis_type':  ['ORA', 'ORA', 'ORA', 'GSEA', 'GSEA', 'GSEA', 'GSEA', 'GSEA'],
+        'contrast':       ['KO_vs_WT'] * 8,
+        'term_id':        ['GOBP_A', 'GOBP_B', 'GOBP_C', 'GOBP_U1', 'GOBP_U2', 'GOBP_D1', 'GOBP_D2', 'R-1'],
+        'adj_pvalue':     [0.01, 0.02, 0.03, 0.01, 0.02, 0.01, 0.04, 0.001],
+        'enrichment_score': [np.nan, np.nan, np.nan, 2.0, 1.5, -2.0, -1.2, 2.5],
+        'cluster_status': ['clustered', 'clustered', 'unresolved_name',
+                           'clustered', 'clustered', 'clustered', 'clustered', 'not_go_library'],
+        'cluster_id':     pd.array([1, 1, None, 1, 1, 2, 2, None], dtype='Int64'),
+        'is_representative': pd.array([True, False, True, True, False, True, False, True], dtype='boolean'),
+        'parent_term':    [None, 'GOBP_A', None, None, 'GOBP_U1', None, 'GOBP_D1', None],
+    })
+
+
+class TestClusterContract:
+    '''
+    cluster_go_terms must preserve row count and satisfy _assert_cluster_contract
+    on every path. The degradation path (rpy2 blocked) is run locally; the live
+    R path is covered by TestClusterLiveRBlock (Rscript) and, through rpy2, only
+    on the cluster. Each clause has a negative control proving it has teeth.
     '''
 
     def _enr(self) -> pd.DataFrame:
@@ -1000,22 +1065,46 @@ class TestClusterNullColumnContract:
             'analysis_type': ['ORA', 'ORA'],
             'contrast':      ['KO_vs_WT', 'KO_vs_WT'],
             'adj_pvalue':    [0.01, 0.02],
+            'enrichment_score': [np.nan, np.nan],
         })
 
-    def test_null_columns_and_rowcount_preserved(self, monkeypatch):
+    def test_degradation_path_satisfies_contract(self, monkeypatch):
         # Block rpy2 so cluster_go_terms' lazy `import rpy2.robjects` raises
         # ImportError (instead of starting embedded R, which segfaults where R is
-        # not linked), taking the null-init degradation path.
+        # not linked), taking the degradation path.
         monkeypatch.setitem(sys.modules, 'rpy2', None)
         enr = self._enr()
         out = cluster_go_terms(enr)
-
         _assert_rowcount_preserved(enr, out)
-        for col in ('cluster_id', 'is_representative', 'parent_term'):
-            assert col in out.columns
-            assert out[col].isna().all(), f'{col} should be NA on the null-init path'
-        # Both the unresolvable GO term and the Reactome term survive.
-        assert set(out['term_id']) == {'GOBP_UNRESOLVABLE_XYZ', 'R-HSA-000000'}
+        _assert_cluster_contract(out)
+        # Both terms survive a representatives-only view.
+        assert set(out.loc[out['is_representative'], 'term_id']) == set(enr['term_id'])
+
+    def test_valid_frame_passes(self):
+        _assert_cluster_contract(_contract_frame())
+
+    @pytest.mark.parametrize('corrupt', [
+        # NA is_representative: the original bug (silently dropped by == True).
+        lambda f: f.assign(is_representative=f['is_representative'].where(f['library'] == 'GO_BP')),
+        # Two representatives in one cluster.
+        lambda f: f.assign(is_representative=f['is_representative'].mask(f['term_id'] == 'GOBP_B', True)),
+        # Representative is not the most significant member.
+        lambda f: f.assign(adj_pvalue=f['adj_pvalue'].mask(f['term_id'] == 'GOBP_B', 0.001)),
+        # A GSEA cluster mixing NES signs.
+        lambda f: f.assign(cluster_id=f['cluster_id'].mask(f['term_id'] == 'GOBP_D2', 1),
+                           parent_term=f['parent_term'].mask(f['term_id'] == 'GOBP_D2', 'GOBP_U1')),
+        # Unclustered row not its own representative.
+        lambda f: f.assign(is_representative=f['is_representative'].mask(f['term_id'] == 'GOBP_C', False)),
+        # cluster_id on an unclustered row.
+        lambda f: f.assign(cluster_id=f['cluster_id'].mask(f['term_id'] == 'GOBP_C', 9)),
+        # Null / unknown status.
+        lambda f: f.assign(cluster_status=f['cluster_status'].mask(f['term_id'] == 'GOBP_C', None)),
+        lambda f: f.assign(cluster_status=f['cluster_status'].mask(f['term_id'] == 'R-1', 'clustered')),
+    ])
+    def test_negative_control_contract_violation_fails(self, corrupt):
+        '''NEGATIVE CONTROL (teeth): each clause must reject a frame that breaks it.'''
+        with pytest.raises(AssertionError):
+            _assert_cluster_contract(corrupt(_contract_frame()))
 
     def test_negative_control_dropped_row_fails_rowcount(self):
         '''
@@ -1030,6 +1119,94 @@ class TestClusterNullColumnContract:
 
 
 # ============================================================
+# M05-13: shipped rrvgo R block, run through Rscript (slow, needs R)
+# ============================================================
+# Embedded R (rpy2) segfaults on the dev Mac, so the exact R code shipped in
+# _RRVGO_R_BLOCK is run here through Rscript with the same inputs rpy2 would set,
+# and its outputs feed the real _annotate_cluster_unit. This does NOT exercise
+# the rpy2 marshalling in _run_rrvgo_unit (verify that on the cluster).
+
+def _rscript() -> str | None:
+    cand = Path(sys.executable).parent / 'Rscript'
+    return str(cand) if cand.exists() else None
+
+
+def _r_chr(values) -> str:
+    return 'c(' + ', '.join('"' + str(v).replace('"', '\\"') + '"' for v in values) + ')'
+
+
+def _run_r_block_via_rscript(unit: pd.DataFrame, tmp_path: Path, timeout: int = 600) -> dict:
+    '''Run enrichment._RRVGO_R_BLOCK for one unit in Rscript; return r_out.
+
+    Full-size units (thousands of GO terms) take tens of minutes; raise timeout for those.
+    '''
+    import subprocess
+    ids = unit['term_id'].tolist()
+    outputs = ['prosift_stage', 'prosift_error', 'prosift_resolved_msig', 'prosift_resolved_go',
+               'prosift_sim_go', 'prosift_red_go', 'prosift_red_cluster']
+    script = '\n'.join([
+        f'prosift_msigdb_ids <- {_r_chr(ids)}',
+        f'prosift_lookup <- {_r_chr(enrichment._msigdb_name_to_go_lookup_phrase(t) for t in ids)}',
+        'prosift_scores <- c(' + ', '.join(repr(float(s)) for s in enrichment._rrvgo_scores(unit['adj_pvalue'])) + ')',
+        'prosift_ont <- "BP"', 'prosift_orgdb <- "org.Mm.eg.db"',
+        f'prosift_threshold <- {enrichment._RRVGO_THRESHOLD}',
+        enrichment._RRVGO_R_BLOCK,
+        f'for (v in {_r_chr(outputs)}) writeLines(as.character(get(v)), file.path("{tmp_path}", v))',
+    ])
+    (tmp_path / 'run.R').write_text(script)
+    proc = subprocess.run([_rscript(), '--vanilla', str(tmp_path / 'run.R')],
+                          capture_output=True, text=True, timeout=timeout)
+    assert proc.returncode == 0, proc.stderr[-2000:]
+
+    def vec(name):
+        return (tmp_path / name).read_text().split('\n')[:-1]
+
+    return {
+        'stage': vec('prosift_stage')[0],
+        'error': ' '.join(vec('prosift_error')),
+        'resolved': dict(zip(vec('prosift_resolved_msig'), vec('prosift_resolved_go'), strict=True)),
+        'sim_go': set(vec('prosift_sim_go')),
+        'red': dict(zip(vec('prosift_red_go'), map(int, vec('prosift_red_cluster')), strict=True)),
+    }
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(_rscript() is None, reason='Rscript not in the prosift env')
+class TestClusterLiveRBlock:
+
+    def test_real_go_terms_cluster_by_theme(self, tmp_path):
+        unit = pd.DataFrame({
+            'term_id': [
+                'GOBP_MRNA_PROCESSING', 'GOBP_RNA_SPLICING',                       # splicing theme
+                'GOBP_SYNAPTIC_VESICLE_CYCLE', 'GOBP_SYNAPTIC_VESICLE_EXOCYTOSIS',  # vesicle theme
+                'GOBP_PROTEIN_RNA_COMPLEX_ORGANIZATION',  # GO name has a hyphen: backward lookup misses
+                'GOBP_NOT_A_REAL_TERM_XYZ',
+            ],
+            'adj_pvalue':   [1e-5, 1e-4, 1e-6, 1e-6, 1e-2, 0.5],
+            'overlap_size': [10, 8, 6, 6, 4, 2],
+        })
+        r_out = _run_r_block_via_rscript(unit, tmp_path)
+        assert r_out['stage'] == 'ok', r_out
+        res = _annotate_cluster_unit(unit, 'ORA', r_out)
+        status = dict(zip(unit['term_id'], res['cluster_status'], strict=True))
+        assert status['GOBP_NOT_A_REAL_TERM_XYZ'] == 'unresolved_name'
+        assert status['GOBP_PROTEIN_RNA_COMPLEX_ORGANIZATION'] == 'unresolved_name'
+        cid = dict(zip(unit['term_id'], res['cluster_local'], strict=True))
+        assert cid['GOBP_MRNA_PROCESSING'] == cid['GOBP_RNA_SPLICING']
+        assert cid['GOBP_SYNAPTIC_VESICLE_CYCLE'] == cid['GOBP_SYNAPTIC_VESICLE_EXOCYTOSIS']
+        assert cid['GOBP_MRNA_PROCESSING'] != cid['GOBP_SYNAPTIC_VESICLE_CYCLE']
+        # Tied adj_pvalue (1e-6) and tied overlap: term_id breaks the tie.
+        reps = set(unit.loc[res['is_representative'] & (res['cluster_status'] == 'clustered'), 'term_id'])
+        assert reps == {'GOBP_MRNA_PROCESSING', 'GOBP_SYNAPTIC_VESICLE_CYCLE'}
+
+        framed = unit.assign(library='GO_BP', analysis_type='ORA', contrast='KO_vs_WT',
+                             enrichment_score=np.nan,
+                             cluster_status=res['cluster_status'], cluster_id=res['cluster_local'],
+                             is_representative=res['is_representative'], parent_term=res['parent_term'])
+        _assert_cluster_contract(framed)
+
+
+# ============================================================
 # M05-5: Empty-run writes four outputs (boundary, local)
 # ============================================================
 
@@ -1037,7 +1214,8 @@ _ENRICHMENT_SCHEMA = [
     'term_id', 'term_name', 'library', 'analysis_type', 'contrast',
     'pvalue', 'adj_pvalue', 'enrichment_score', 'odds_ratio',
     'combined_score', 'gene_set_size', 'overlap_size', 'overlap_genes',
-    'gene_set_version', 'cluster_id', 'is_representative', 'parent_term',
+    'gene_set_version', 'cluster_status', 'cluster_id', 'is_representative',
+    'parent_term',
 ]
 
 
@@ -1142,3 +1320,15 @@ class TestEmptyRunOutputs:
         empty.mkdir()
         with pytest.raises(AssertionError):
             _assert_four_outputs(empty, 'EMPTYRUN')
+
+    def test_one_resolvable_term_ends_too_few(self, tmp_path):
+        # Exercises the R block's own 'too_few' stage and its output reset: one
+        # resolvable and one unresolvable name never reach calculateSimMatrix.
+        unit = pd.DataFrame({'term_id': ['GOBP_MRNA_PROCESSING', 'GOBP_NOT_A_REAL_TERM_XYZ'],
+                             'adj_pvalue': [1e-5, 0.5], 'overlap_size': [10, 2]})
+        r_out = _run_r_block_via_rscript(unit, tmp_path)
+        assert r_out['stage'] == 'too_few', r_out
+        assert r_out['sim_go'] == set() and r_out['red'] == {}
+        res = _annotate_cluster_unit(unit, 'ORA', r_out)
+        assert list(res['cluster_status']) == ['too_few_terms', 'unresolved_name']
+        assert res['is_representative'].all()

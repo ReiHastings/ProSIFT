@@ -1215,17 +1215,9 @@ def write_summary(
                     lines.append(f"  {lib:<12} {sig_count:<12} {top_str}")
                 lines.append("")
 
-            # --- GO clustering summary per analysis_type (GO libraries only) ---
-            go_cdf = cdf[cdf["library"].isin(["GO_BP", "GO_MF", "GO_CC"])]
-            if not go_cdf.empty and "cluster_id" in go_cdf.columns:
-                go_cl = go_cdf.dropna(subset=["cluster_id"])
-                if not go_cl.empty:
-                    lines.append("GO clustering (rrvgo, Rel similarity, threshold=0.7):")
-                    for (lib, atype), sub in go_cl.groupby(["library", "analysis_type"]):
-                        n_terms = len(sub)
-                        n_clust = int(sub["cluster_id"].nunique())
-                        lines.append(f"  {lib} {atype:<6} {n_terms:>4} terms -> {n_clust} clusters")
-                    lines.append("")
+            # --- GO clustering summary (all terms counted, not only clustered ones) ---
+            if "cluster_status" in cdf.columns:
+                lines.extend(_clustering_summary_lines(cdf))
 
             if enr["run_gsea"]:
                 lines.append("GSEA results:")
@@ -1263,9 +1255,123 @@ _MSIGDB_GO_PREFIXES = {
     'GO_CC': 'CC',
 }
 
-# Semantic similarity threshold for reduceSimMatrix.
-# rrvgo defaults to 0.7 (Wang similarity). Higher = fewer, larger clusters.
+# Semantic similarity threshold for reduceSimMatrix (Rel similarity).
+# 0.7 is the rrvgo default. Higher = fewer, larger clusters.
 _RRVGO_THRESHOLD = 0.7
+
+# --- cluster_status vocabulary (spec Section 4.13) ---
+# Every row gets exactly one value. Only 'clustered' rows carry a cluster_id.
+# All other rows are unclustered and therefore represent themselves
+# (is_representative=True), so a "representatives only" filter never silently
+# drops them; cluster_status says WHY a row was not clustered.
+CLUSTER_STATUS_CLUSTERED     = 'clustered'               # member of an rrvgo cluster
+CLUSTER_STATUS_NOT_GO        = 'not_go_library'          # REACTOME etc.: no GO DAG, by design
+CLUSTER_STATUS_UNRESOLVED    = 'unresolved_name'         # MSigDB name -> GO ID lookup missed
+CLUSTER_STATUS_RRVGO_DROPPED = 'dropped_by_rrvgo'        # resolved, but rrvgo dropped it (no IC, no ancestors, all-NA similarity)
+CLUSTER_STATUS_TOO_FEW       = 'too_few_terms'           # <2 clusterable terms in its unit
+CLUSTER_STATUS_NO_DIRECTION  = 'no_direction'            # GSEA row with NES 0 or missing (cannot be assigned to up/down)
+CLUSTER_STATUS_GROUP_ERROR   = 'group_error'             # R raised for this unit
+CLUSTER_STATUS_UNAVAILABLE   = 'clustering_unavailable'  # rpy2 or R packages missing for the whole run
+
+CLUSTER_STATUSES = (
+    CLUSTER_STATUS_CLUSTERED, CLUSTER_STATUS_NOT_GO, CLUSTER_STATUS_UNRESOLVED,
+    CLUSTER_STATUS_RRVGO_DROPPED, CLUSTER_STATUS_TOO_FEW, CLUSTER_STATUS_NO_DIRECTION,
+    CLUSTER_STATUS_GROUP_ERROR, CLUSTER_STATUS_UNAVAILABLE,
+)
+
+# R-side outcome of one clustering unit (prosift_stage in _RRVGO_R_BLOCK)
+_R_STAGE_OK            = 'ok'             # reduceSimMatrix returned clusters
+_R_STAGE_TOO_FEW       = 'too_few'        # <2 distinct resolved GO IDs; rrvgo not called
+_R_STAGE_SIM_TOO_SMALL = 'sim_too_small'  # calculateSimMatrix kept <2 terms
+_R_STAGE_SIM_ERROR     = 'sim_error'      # calculateSimMatrix raised
+_R_STAGE_REDUCE_ERROR  = 'reduce_error'   # reduceSimMatrix raised or returned nothing
+
+# R code run once per clustering unit. Kept as a module constant (not inline)
+# so the exact shipped R can also be exercised through Rscript where embedded R
+# (rpy2) is not available. Inputs (set in globalenv by the caller):
+#   prosift_msigdb_ids, prosift_lookup, prosift_scores, prosift_ont,
+#   prosift_orgdb, prosift_threshold
+# Outputs are plain atomic vectors (no data.frame conversion needed):
+#   prosift_stage, prosift_error, prosift_resolved_msig, prosift_resolved_go,
+#   prosift_sim_go, prosift_red_go, prosift_red_cluster
+_RRVGO_R_BLOCK = r"""
+# 0. Reset every output first, so a value can never leak from the previous unit.
+prosift_stage         <- "too_few"
+prosift_error         <- ""
+prosift_resolved_msig <- character()
+prosift_resolved_go   <- character()
+prosift_sim_go        <- character()
+prosift_red_go        <- character()
+prosift_red_cluster   <- integer()
+
+suppressMessages({
+    library(GO.db)
+    library(rrvgo)
+    library(AnnotationDbi)
+})
+
+# 1. MSigDB name -> GO ID via GO.db TERM table (case-insensitive).
+#    MSigDB names are ALL-CAPS while GO.db stores canonical term names with
+#    mixed case (e.g., "DNA binding"), so the match must be case-insensitive.
+#    Names that do not resolve are reported back as unresolved.
+all_terms_df <- AnnotationDbi::select(
+    GO.db,
+    keys     = AnnotationDbi::keys(GO.db, keytype = "GOID"),
+    keytype  = "GOID",
+    columns  = c("TERM", "ONTOLOGY")
+)
+go_df <- all_terms_df[!is.na(all_terms_df$TERM)
+                      & all_terms_df$ONTOLOGY == prosift_ont[1], , drop = FALSE]
+go_df$TERM_LC <- tolower(go_df$TERM)
+go_df <- go_df[!duplicated(go_df$TERM_LC), , drop = FALSE]
+
+match_idx     <- match(tolower(prosift_lookup), go_df$TERM_LC)
+resolved_mask <- !is.na(match_idx)
+prosift_resolved_msig <- as.character(prosift_msigdb_ids[resolved_mask])
+prosift_resolved_go   <- as.character(go_df$GOID[match_idx[resolved_mask]])
+resolved_scores       <- prosift_scores[resolved_mask]
+
+if (length(unique(prosift_resolved_go)) >= 2) {
+    # 2. One score per GO ID (highest), as rrvgo expects unique GO IDs.
+    ord      <- order(-resolved_scores)
+    keep_idx <- ord[!duplicated(prosift_resolved_go[ord])]
+    uniq_go     <- prosift_resolved_go[keep_idx]
+    uniq_scores <- resolved_scores[keep_idx]
+    names(uniq_scores) <- uniq_go
+
+    # 3. Semantic similarity. rrvgo silently drops terms without IC, without
+    #    ancestors, or with all-NA similarity; prosift_sim_go records survivors.
+    sim <- tryCatch(
+        rrvgo::calculateSimMatrix(uniq_go, orgdb = prosift_orgdb[1],
+                                  ont = prosift_ont[1], method = "Rel"),
+        error = function(e) { prosift_error <<- conditionMessage(e); NULL }
+    )
+    if (is.null(sim)) {
+        prosift_stage <- "sim_error"
+    } else {
+        prosift_sim_go <- as.character(rownames(sim))
+        if (nrow(sim) < 2) {
+            prosift_stage <- "sim_too_small"
+        } else {
+            # 4. Hierarchical clustering at the similarity threshold.
+            reduced <- tryCatch(
+                rrvgo::reduceSimMatrix(sim, scores = uniq_scores,
+                                       threshold = prosift_threshold[1],
+                                       orgdb = prosift_orgdb[1]),
+                error = function(e) { prosift_error <<- conditionMessage(e); NULL }
+            )
+            if (is.null(reduced) || nrow(reduced) == 0) {
+                prosift_stage <- "reduce_error"
+                if (prosift_error == "") prosift_error <- "reduceSimMatrix returned no rows"
+            } else {
+                prosift_red_go      <- as.character(reduced$go)
+                prosift_red_cluster <- as.integer(reduced$cluster)
+                prosift_stage       <- "ok"
+            }
+        }
+    }
+}
+"""
 
 
 def _msigdb_name_to_go_lookup_phrase(term_id: str) -> str:
@@ -1283,55 +1389,296 @@ def _msigdb_name_to_go_lookup_phrase(term_id: str) -> str:
     return stripped.replace('_', ' ').lower()
 
 
+def _rrvgo_scores(adj_pvalue: pd.Series) -> np.ndarray:
+    """
+    rrvgo score per term: -log10(adj_pvalue). A missing p-value scores 0; a zero
+    p-value (GSEA permutation floor) is clamped to 1e-300 to stay finite.
+    """
+    raw_p = adj_pvalue.astype(float).to_numpy()
+    raw_p = np.where(np.isnan(raw_p), 1.0, raw_p)
+    raw_p = np.where(raw_p <= 0, 1e-300, raw_p)
+    return -np.log10(raw_p)
+
+
+def _pick_representatives(members: pd.DataFrame, analysis_type: str) -> dict:
+    """
+    Return {cluster_local: row index of its representative}.
+
+    The representative is the most significant member. Ties on adj_pvalue are
+    common (BH ties, the GSEA permutation floor), so a fixed tie-break makes the
+    choice reproducible regardless of input row order:
+      1. lowest adj_pvalue (missing last)
+      2. GSEA: largest |NES|; ORA: largest overlap_size (missing last)
+      3. term_id, alphabetical
+    """
+    keyed = members.assign(
+        _p=members['adj_pvalue'].astype(float),
+        _effect=(
+            members['enrichment_score'].astype(float).abs()
+            if analysis_type == 'GSEA' and 'enrichment_score' in members
+            else members['overlap_size'].astype(float)
+            if 'overlap_size' in members
+            else 0.0
+        ),
+        _tid=members['term_id'].astype(str),
+    )
+    ordered = keyed.sort_values(
+        ['_p', '_effect', '_tid'], ascending=[True, False, True],
+        na_position='last', kind='stable',
+    )
+    first = ordered.drop_duplicates(subset='cluster_local', keep='first')
+    return dict(zip(first['cluster_local'], first.index, strict=True))
+
+
+def _annotate_cluster_unit(
+    unit: pd.DataFrame,
+    analysis_type: str,
+    r_out: dict | None,
+) -> pd.DataFrame:
+    """
+    Pure-Python core of cluster_go_terms for ONE clustering unit: assign
+    cluster_status, a unit-local cluster number, is_representative and
+    parent_term to every row, from the R outcome.
+
+    unit:   the unit's rows (term_id, adj_pvalue, enrichment_score/overlap_size).
+    r_out:  None when R raised for this unit; otherwise a dict with keys
+            stage (one of the _R_STAGE_* values), resolved ({term_id: GO ID}),
+            sim_go (set of GO IDs kept by calculateSimMatrix) and
+            red ({GO ID: rrvgo cluster number}).
+
+    Returns a DataFrame indexed like `unit` with columns cluster_status,
+    cluster_local (Int64, NA unless clustered), is_representative (bool) and
+    parent_term (object, NA for representatives and unclustered rows).
+    """
+    res = pd.DataFrame(index=unit.index)
+    res['cluster_status'] = CLUSTER_STATUS_GROUP_ERROR
+    res['cluster_local'] = pd.Series(pd.NA, index=unit.index, dtype='Int64')
+    res['is_representative'] = True
+    res['parent_term'] = pd.Series(pd.NA, index=unit.index, dtype='object')
+    if r_out is None:
+        return res
+
+    stage = r_out['stage']
+    resolved, sim_go, red = r_out['resolved'], r_out['sim_go'], r_out['red']
+
+    # --- 1. Status for every row, from where it fell out of the R pipeline ---
+    for idx, term_id in unit['term_id'].items():
+        go_id = resolved.get(term_id)
+        if go_id is None:
+            status = CLUSTER_STATUS_UNRESOLVED
+        elif stage == _R_STAGE_TOO_FEW:
+            status = CLUSTER_STATUS_TOO_FEW
+        elif stage == _R_STAGE_SIM_ERROR:
+            status = CLUSTER_STATUS_GROUP_ERROR
+        elif go_id not in sim_go:
+            status = CLUSTER_STATUS_RRVGO_DROPPED
+        elif stage == _R_STAGE_SIM_TOO_SMALL:
+            status = CLUSTER_STATUS_TOO_FEW
+        elif stage == _R_STAGE_REDUCE_ERROR:
+            status = CLUSTER_STATUS_GROUP_ERROR
+        elif go_id in red:
+            status = CLUSTER_STATUS_CLUSTERED
+            res.at[idx, 'cluster_local'] = int(red[go_id])
+        else:
+            # Kept in the similarity matrix but absent from reduceSimMatrix output.
+            status = CLUSTER_STATUS_RRVGO_DROPPED
+        res.at[idx, 'cluster_status'] = status
+
+    # --- 2. One representative per cluster; members point to it ---
+    clustered = res['cluster_status'] == CLUSTER_STATUS_CLUSTERED
+    if clustered.any():
+        members = unit.loc[clustered].assign(cluster_local=res.loc[clustered, 'cluster_local'])
+        reps = _pick_representatives(members, analysis_type)
+        for idx in members.index:
+            rep_idx = reps[members.at[idx, 'cluster_local']]
+            if idx != rep_idx:
+                res.at[idx, 'is_representative'] = False
+                res.at[idx, 'parent_term'] = unit.at[rep_idx, 'term_id']
+    return res
+
+
+def _clustering_units(group: pd.DataFrame, analysis_type: str) -> tuple[list, pd.Index]:
+    """
+    Split one (library, analysis_type, contrast) group into clustering units.
+
+    ORA is a single unit (its gene set is the pooled up + down significant set,
+    so terms carry no direction). GSEA is split by NES sign so a cluster never
+    mixes enriched-in-numerator and enriched-in-denominator terms; otherwise a
+    significant term of one direction could be hidden behind a representative of
+    the other. GSEA rows with NES 0 or missing cannot be placed and are returned
+    separately.
+
+    Returns (units, no_direction_index): units is a list of (label, DataFrame).
+    """
+    if analysis_type != 'GSEA':
+        return [('all', group)], group.index[:0]
+    nes = group['enrichment_score'].astype(float)
+    units = [('NES>0', group[nes > 0]), ('NES<0', group[nes < 0])]
+    no_direction = group.index[~((nes > 0) | (nes < 0))]
+    return units, no_direction
+
+
+def _run_rrvgo_unit(ro, unit: pd.DataFrame, ont: str, orgdb: str, threshold: float) -> dict:
+    """
+    Run _RRVGO_R_BLOCK for one unit through rpy2 and return its outputs in the
+    r_out shape consumed by _annotate_cluster_unit. Raises on any R error.
+    """
+    msigdb_ids = unit['term_id'].astype(str).tolist()
+    ro.globalenv['prosift_msigdb_ids'] = ro.StrVector(msigdb_ids)
+    ro.globalenv['prosift_lookup']     = ro.StrVector(
+        [_msigdb_name_to_go_lookup_phrase(t) for t in msigdb_ids])
+    ro.globalenv['prosift_scores']     = ro.FloatVector(_rrvgo_scores(unit['adj_pvalue']).tolist())
+    ro.globalenv['prosift_ont']        = ro.StrVector([ont])
+    ro.globalenv['prosift_orgdb']      = ro.StrVector([orgdb])
+    ro.globalenv['prosift_threshold']  = ro.FloatVector([float(threshold)])
+    ro.r(_RRVGO_R_BLOCK)
+
+    def _vec(name: str) -> list:
+        return list(ro.globalenv[name])
+
+    error = _vec('prosift_error')
+    return {
+        'stage':    _vec('prosift_stage')[0],
+        'error':    error[0] if error else '',
+        'resolved': dict(zip(_vec('prosift_resolved_msig'), _vec('prosift_resolved_go'), strict=True)),
+        'sim_go':   set(_vec('prosift_sim_go')),
+        'red':      dict(zip(_vec('prosift_red_go'), [int(c) for c in _vec('prosift_red_cluster')], strict=True)),
+    }
+
+
+def warn_unclustered_go_groups(enrichment_results: pd.DataFrame) -> list:
+    """
+    Failure check for the "unclustered rows are their own representative"
+    contract: when a GO group has NO clustered rows, every row is
+    is_representative=True and a representatives-only view looks valid while
+    nothing was collapsed. Log a warning per such (library, analysis_type,
+    contrast) group and return the list of groups.
+    """
+    needed = {'cluster_status', 'library', 'analysis_type', 'contrast'}
+    if enrichment_results.empty or not needed <= set(enrichment_results.columns):
+        return []
+    go = enrichment_results[enrichment_results['library'].isin(_MSIGDB_GO_PREFIXES.keys())]
+    unclustered = []
+    for key, sub in go.groupby(['library', 'analysis_type', 'contrast'], sort=True, dropna=False):
+        if not (sub['cluster_status'] == CLUSTER_STATUS_CLUSTERED).any():
+            counts = sub['cluster_status'].value_counts().to_dict()
+            logging.warning(
+                'GO clustering produced NO clusters for %s/%s/%s (%d terms; %s). '
+                'These terms are NOT collapsed: is_representative=True for all of them.',
+                *key, len(sub), counts,
+            )
+            unclustered.append(key)
+    return unclustered
+
+
+def _clustering_summary_lines(cdf: pd.DataFrame) -> list:
+    """
+    Summary-text block for one contrast's results: per (library, analysis_type),
+    ALL tested terms with the clustered count, the MSigDB -> GO ID resolution
+    rate (GO only) and a count per cluster_status, so terms left unclustered are
+    visible rather than silently omitted. Flags GO groups with no clusters.
+    """
+    lines = [
+        f"GO clustering (rrvgo, Rel similarity, threshold={_RRVGO_THRESHOLD}; "
+        "GSEA clustered separately by NES sign):",
+    ]
+    for (lib, atype), sub in cdf.groupby(["library", "analysis_type"], sort=True):
+        n_terms = len(sub)
+        status = sub["cluster_status"]
+        if lib not in _MSIGDB_GO_PREFIXES:
+            lines.append(f"  {lib} {atype:<6} {n_terms:>5} terms: not clustered (not a GO library)")
+            continue
+        n_clustered = int((status == CLUSTER_STATUS_CLUSTERED).sum())
+        n_clusters = int(sub["cluster_id"].nunique())
+        # Name resolution is known exactly for rows R finished with (clustered,
+        # unresolved, dropped, too_few). It cannot be read from status when R
+        # errored (group_error rows may or may not have resolved, while their
+        # unit's unresolved rows are still counted), so report it as unavailable
+        # rather than print a biased rate. no_direction rows never reach R and
+        # are left out of the denominator.
+        n_resolution_known = int(status.isin([
+            CLUSTER_STATUS_CLUSTERED, CLUSTER_STATUS_UNRESOLVED,
+            CLUSTER_STATUS_RRVGO_DROPPED, CLUSTER_STATUS_TOO_FEW,
+        ]).sum())
+        n_unresolved = int((status == CLUSTER_STATUS_UNRESOLVED).sum())
+        if status.isin([CLUSTER_STATUS_GROUP_ERROR, CLUSTER_STATUS_UNAVAILABLE]).any():
+            resolved_str = "name resolution rate unavailable (R did not complete)"
+        elif n_resolution_known:
+            resolved_str = f"{1 - n_unresolved / n_resolution_known:.1%} names resolved to GO IDs"
+        else:
+            resolved_str = "name resolution not attempted"
+        counts = ", ".join(f"{k}={v}" for k, v in status.value_counts().sort_index().items())
+        lines.append(
+            f"  {lib} {atype:<6} {n_terms:>5} terms: {n_clustered} clustered "
+            f"({n_clustered / n_terms:.1%}) -> {n_clusters} clusters; {resolved_str}"
+        )
+        lines.append(f"  {'':<{len(lib) + 7}} status: {counts}")
+        if n_clustered == 0:
+            lines.append(
+                f"  WARNING: no {lib} {atype} terms were clustered; is_representative=True "
+                "for all of them, so a representatives-only view is NOT collapsed."
+            )
+    lines.append("")
+    return lines
+
+
 def cluster_go_terms(
     enrichment_results: pd.DataFrame,
     threshold: float = _RRVGO_THRESHOLD,
     orgdb: str = 'org.Mm.eg.db',
 ) -> pd.DataFrame:
     """
-    Add cluster_id, is_representative, parent_term columns to the enrichment
-    results table using rrvgo's GO semantic similarity clustering.
+    Add cluster_status, cluster_id, is_representative, parent_term columns to the
+    enrichment results table using rrvgo's GO semantic similarity clustering.
 
-    Clustering is performed independently per (library, analysis_type, contrast)
-    group, and only for GO libraries (GO_BP, GO_MF, GO_CC). All three columns
-    are null for non-GO rows and for GO rows whose MSigDB term_id could not be
-    resolved to a GO ID.
+    Clustering units: one per (library, analysis_type, contrast) for ORA, and one
+    per (library, 'GSEA', contrast, NES sign) for GSEA. GO libraries only
+    (GO_BP, GO_MF, GO_CC).
 
-    Representative selection: within each cluster, the term with the lowest
-    adj_pvalue is flagged is_representative=True. parent_term is the term_id of
-    the representative for every non-representative row; null for representatives.
+    Contract (spec Section 4.13):
+      - cluster_status is never null; see CLUSTER_STATUSES.
+      - cluster_id is non-null only for 'clustered' rows. It is unique within a
+        (library, analysis_type, contrast) group (GSEA up and down clusters are
+        numbered in one sequence), not across groups.
+      - is_representative is never null. Exactly one row per cluster is True
+        (lowest adj_pvalue, fixed tie-break, see _pick_representatives); every
+        unclustered row is True because it represents itself. A
+        representatives-only view therefore keeps every non-GO and unclustered term.
+      - parent_term is the representative's term_id for non-representative
+        cluster members; null otherwise.
 
-    If rpy2/rrvgo is unavailable, returns the input DataFrame unchanged plus the
-    three columns filled with null values, and logs a warning.
+    Never drops rows. If rpy2 or the R packages are unavailable, every GO row is
+    'clustering_unavailable'. Any GO group left with no clusters is warned about
+    (warn_unclustered_go_groups).
     """
-    # --- Initialize new columns as null (preserved when clustering is skipped) ---
+    # --- Initialize: every row unclustered and its own representative ---
     out = enrichment_results.copy()
-    out['cluster_id'] = pd.Series([pd.NA] * len(out), dtype='Int64')
-    out['is_representative'] = pd.Series([pd.NA] * len(out), dtype='object')
-    out['parent_term'] = pd.Series([pd.NA] * len(out), dtype='object')
+    out['cluster_status'] = pd.Series(CLUSTER_STATUS_NOT_GO, index=out.index, dtype='object')
+    out['cluster_id'] = pd.Series(pd.NA, index=out.index, dtype='Int64')
+    out['is_representative'] = pd.Series(True, index=out.index, dtype='boolean')
+    out['parent_term'] = pd.Series(pd.NA, index=out.index, dtype='object')
 
     if out.empty:
         return out
 
-    # --- Only cluster GO libraries ---
     go_mask = out['library'].isin(_MSIGDB_GO_PREFIXES.keys())
     if not go_mask.any():
         logging.info('No GO-family libraries in results; skipping redundancy reduction.')
         return out
+    out.loc[go_mask, 'cluster_status'] = CLUSTER_STATUS_UNAVAILABLE
 
     # --- Import rpy2 lazily (see module header) ---
     # Deferred to call time so that merely importing this module never starts
-    # embedded R. rpy2 objects (ro, importr, ...) are local to this function.
+    # embedded R. rpy2 objects (ro, importr) are local to this function.
     try:
         import rpy2.robjects as ro
-        from rpy2.robjects import pandas2ri
-        from rpy2.robjects.conversion import localconverter
         from rpy2.robjects.packages import importr
     except ImportError:
         logging.warning(
             'rpy2 not available; GO term redundancy reduction skipped. '
-            'cluster_id, is_representative, parent_term will be null for all terms.'
+            "All GO terms get cluster_status='%s'.", CLUSTER_STATUS_UNAVAILABLE,
         )
+        warn_unclustered_go_groups(out)
         return out
 
     # --- Load rrvgo + GO.db + organism annotation (fail fast) ---
@@ -1342,200 +1689,55 @@ def cluster_go_terms(
     except Exception as exc:
         logging.warning(
             'Failed to load R packages for GO clustering (%s): %s. '
-            'Proceeding with null cluster columns.', orgdb, exc,
+            "All GO terms get cluster_status='%s'.", orgdb, exc, CLUSTER_STATUS_UNAVAILABLE,
         )
+        warn_unclustered_go_groups(out)
         return out
 
     # --- Iterate (library, analysis_type, contrast) groups of GO rows ---
-    for (lib, atype, contrast), sub in out[go_mask].groupby(
-        ['library', 'analysis_type', 'contrast'], sort=False
+    for (lib, atype, contrast), group in out[go_mask].groupby(
+        ['library', 'analysis_type', 'contrast'], sort=False, dropna=False
     ):
         ont = _MSIGDB_GO_PREFIXES[lib]
-        n_terms = len(sub)
-        if n_terms < 2:
-            logging.info(
-                'Skipping clustering for %s/%s/%s: %d terms (need >=2).',
-                lib, atype, contrast, n_terms,
-            )
-            continue
+        units, no_direction = _clustering_units(group, atype)
+        out.loc[no_direction, 'cluster_status'] = CLUSTER_STATUS_NO_DIRECTION
+        next_cluster_id = 1  # GSEA up and down units share one numbering sequence
 
-        # --- Build MSigDB term_id -> lookup phrase, pass to R ---
-        msigdb_ids = sub['term_id'].tolist()
-        lookup_phrases = [_msigdb_name_to_go_lookup_phrase(t) for t in msigdb_ids]
-        # rrvgo needs a score per GO term. Use -log10(adj_pvalue), capped at
-        # a large finite value if adj_pvalue is 0 or null.
-        raw_p = sub['adj_pvalue'].astype(float).to_numpy()
-        raw_p = np.where(np.isnan(raw_p), 1.0, raw_p)
-        raw_p = np.where(raw_p <= 0, 1e-300, raw_p)
-        scores = -np.log10(raw_p)
-
-        try:
-            # Fresh R environment per group to avoid cross-group contamination
-            ro.globalenv['prosift_msigdb_ids']   = ro.StrVector(msigdb_ids)
-            ro.globalenv['prosift_lookup']       = ro.StrVector(lookup_phrases)
-            ro.globalenv['prosift_scores']       = ro.FloatVector(scores.tolist())
-            ro.globalenv['prosift_ont']          = ro.StrVector([ont])
-            ro.globalenv['prosift_orgdb']        = ro.StrVector([orgdb])
-            ro.globalenv['prosift_threshold']    = ro.FloatVector([float(threshold)])
-
-            ro.r("""
-                suppressMessages({
-                    library(GO.db)
-                    library(rrvgo)
-                    library(AnnotationDbi)
-                })
-
-                # 1. MSigDB name -> GO ID via GO.db TERM table (case-insensitive).
-                #    MSigDB names are ALL-CAPS while GO.db stores canonical term
-                #    names with mixed case (e.g., "DNA binding"), so the match
-                #    must be case-insensitive. Some MSigDB names still will not
-                #    resolve (obsolete/renamed terms); those are dropped before
-                #    calculateSimMatrix.
-                all_terms_df <- tryCatch(
-                    AnnotationDbi::select(
-                        GO.db,
-                        keys     = AnnotationDbi::keys(GO.db, keytype="GOID"),
-                        keytype  = "GOID",
-                        columns  = c("TERM", "ONTOLOGY")
-                    ),
-                    error = function(e) { data.frame(TERM=character(), GOID=character(), ONTOLOGY=character()) }
-                )
-                # Restrict to the requested ontology
-                go_df <- all_terms_df[!is.na(all_terms_df$TERM)
-                                      & all_terms_df$ONTOLOGY == prosift_ont[1], , drop=FALSE]
-                go_df$TERM_LC <- tolower(go_df$TERM)
-
-                # De-duplicate on lowercased TERM
-                go_df <- go_df[!duplicated(go_df$TERM_LC), , drop=FALSE]
-
-                # Build aligned vectors: for each lookup phrase, find first matching GOID
-                match_idx <- match(tolower(prosift_lookup), go_df$TERM_LC)
-                resolved_mask <- !is.na(match_idx)
-                resolved_go   <- go_df$GOID[match_idx[resolved_mask]]
-                resolved_msig <- prosift_msigdb_ids[resolved_mask]
-                resolved_scores <- prosift_scores[resolved_mask]
-
-                prosift_cluster_ok <- FALSE
-                prosift_result <- data.frame(
-                    msigdb_id = character(), go_id = character(),
-                    cluster = integer(), parent_go = character()
-                )
-
-                if (length(resolved_go) >= 2 && length(unique(resolved_go)) >= 2) {
-                    # De-duplicate resolved GO IDs (keep highest score per GO ID)
-                    ord <- order(-resolved_scores)
-                    keep <- !duplicated(resolved_go[ord])
-                    keep_idx <- ord[keep]
-                    uniq_go     <- resolved_go[keep_idx]
-                    uniq_msig   <- resolved_msig[keep_idx]
-                    uniq_scores <- resolved_scores[keep_idx]
-
-                    names(uniq_scores) <- uniq_go
-
-                    sim <- tryCatch(
-                        rrvgo::calculateSimMatrix(
-                            uniq_go,
-                            orgdb  = prosift_orgdb[1],
-                            ont    = prosift_ont[1],
-                            method = "Rel"
-                        ),
-                        error = function(e) { NULL }
-                    )
-
-                    if (!is.null(sim) && nrow(sim) >= 2) {
-                        reduced <- tryCatch(
-                            rrvgo::reduceSimMatrix(
-                                sim,
-                                scores    = uniq_scores,
-                                threshold = prosift_threshold[1],
-                                orgdb     = prosift_orgdb[1]
-                            ),
-                            error = function(e) { NULL }
-                        )
-                        if (!is.null(reduced) && nrow(reduced) > 0) {
-                            # reduced columns: go, cluster, parent, parentTerm, score, size, term
-                            # Align back to MSigDB IDs
-                            reduced_msig <- uniq_msig[match(reduced$go, uniq_go)]
-                            parent_msig  <- uniq_msig[match(reduced$parent, uniq_go)]
-                            prosift_result <- data.frame(
-                                msigdb_id = reduced_msig,
-                                go_id     = as.character(reduced$go),
-                                cluster   = as.integer(reduced$cluster),
-                                parent_msigdb = parent_msig,
-                                stringsAsFactors = FALSE
-                            )
-                            prosift_cluster_ok <- TRUE
-                        }
-                    }
-                }
-            """)
-
-            cluster_ok = bool(ro.globalenv['prosift_cluster_ok'][0])
-            if not cluster_ok:
-                logging.warning(
-                    'rrvgo clustering produced no output for %s/%s/%s (n=%d). '
-                    'Leaving cluster columns null for this group.',
-                    lib, atype, contrast, n_terms,
-                )
+        for label, unit in units:
+            if unit.empty:
                 continue
+            # Single-row units still go through R: the R block resolves the name and
+            # returns stage 'too_few', so the row gets unresolved_name or too_few_terms.
 
-            with localconverter(ro.default_converter + pandas2ri.converter):
-                reduced_df = ro.conversion.rpy2py(ro.globalenv['prosift_result'])
+            # 1. Run R; any R error leaves this unit as group_error.
+            try:
+                r_out = _run_rrvgo_unit(ro, unit, ont, orgdb, threshold)
+            except Exception as exc:
+                logging.warning('R-side clustering failed for %s/%s/%s [%s]: %s',
+                                lib, atype, contrast, label, exc)
+                r_out = None
+            if r_out is not None and r_out['error']:
+                logging.warning('rrvgo error for %s/%s/%s [%s] (stage %s): %s',
+                                lib, atype, contrast, label, r_out['stage'], r_out['error'])
 
-        except Exception as exc:
-            logging.warning(
-                'R-side clustering failed for %s/%s/%s: %s. '
-                'Leaving cluster columns null for this group.',
-                lib, atype, contrast, exc,
-            )
-            continue
+            # 2. Statuses, representatives, parents (pure Python).
+            res = _annotate_cluster_unit(unit, atype, r_out)
 
-        if reduced_df.empty:
-            continue
+            # 3. Renumber rrvgo's per-unit cluster numbers into the group's sequence.
+            local_ids = sorted(res['cluster_local'].dropna().unique())
+            renumber = {old: next_cluster_id + i for i, old in enumerate(local_ids)}
+            next_cluster_id += len(local_ids)
 
-        # --- Assign cluster_id + parent (as MSigDB term_id) to the full sub ---
-        # reduced_df: msigdb_id, go_id, cluster, parent_msigdb (one row per unique resolved GO)
-        cluster_map = dict(zip(reduced_df['msigdb_id'], reduced_df['cluster'].astype(int), strict=True))
-        # rrvgo's own parent_msigdb is deliberately not used: the representative
-        # is the lowest-adj_pvalue term in each cluster (spec Section 5, rrvgo).
+            out.loc[unit.index, 'cluster_status'] = res['cluster_status']
+            out.loc[unit.index, 'cluster_id'] = res['cluster_local'].map(renumber).astype('Int64')
+            out.loc[unit.index, 'is_representative'] = res['is_representative'].astype('boolean')
+            out.loc[unit.index, 'parent_term'] = res['parent_term']
 
-        # --- Determine representative per cluster (lowest adj_pvalue within cluster) ---
-        sub_ann = sub.copy()
-        sub_ann['cluster_id'] = sub_ann['term_id'].map(cluster_map).astype('Int64')
+            counts = res['cluster_status'].value_counts().to_dict()
+            logging.info('GO clustering %s/%s/%s [%s]: %d terms -> %d clusters; statuses %s',
+                         lib, atype, contrast, label, len(unit), len(local_ids), counts)
 
-        # For rows in an assigned cluster, find the row with minimum adj_pvalue
-        assigned = sub_ann.dropna(subset=['cluster_id']).copy()
-        if assigned.empty:
-            continue
-
-        # Global row index per (cluster_id -> representative term_id)
-        rep_per_cluster = (
-            assigned.sort_values('adj_pvalue', ascending=True, na_position='last')
-                    .drop_duplicates(subset='cluster_id', keep='first')
-                    .set_index('cluster_id')['term_id']
-                    .to_dict()
-        )
-
-        # --- Write back into `out` using the original index from `sub` ---
-        for idx in sub.index:
-            term_id = out.at[idx, 'term_id']
-            if term_id not in cluster_map:
-                continue
-            cid = int(cluster_map[term_id])
-            rep = rep_per_cluster.get(cid)
-            is_rep = (term_id == rep)
-            out.at[idx, 'cluster_id'] = cid
-            out.at[idx, 'is_representative'] = bool(is_rep)
-            out.at[idx, 'parent_term'] = pd.NA if is_rep else rep
-
-        n_clusters = int(sub_ann['cluster_id'].dropna().nunique())
-        n_assigned = int(sub_ann['cluster_id'].notna().sum())
-        logging.info(
-            'GO clustering %s/%s/%s: %d terms -> %d assigned to %d clusters '
-            '(%d unassigned: MSigDB->GO.db lookup miss).',
-            lib, atype, contrast, n_terms, n_assigned, n_clusters, n_terms - n_assigned,
-        )
-
+    warn_unclustered_go_groups(out)
     return out
 
 
@@ -1671,15 +1873,17 @@ def main() -> None:
             "term_id", "term_name", "library", "analysis_type", "contrast",
             "pvalue", "adj_pvalue", "enrichment_score", "odds_ratio",
             "combined_score", "gene_set_size", "overlap_size", "overlap_genes",
-            "gene_set_version", "cluster_id", "is_representative", "parent_term",
+            "gene_set_version", "cluster_status", "cluster_id", "is_representative",
+            "parent_term",
         ])
     # Same gene_set_version dtype on the empty and populated paths (other
     # columns in an empty table are still untyped in Parquet; pre-existing).
     enrichment_results["gene_set_version"] = enrichment_results["gene_set_version"].astype("string")
 
     # --- GO-term redundancy reduction (rrvgo via rpy2) ---
-    # Adds cluster_id, is_representative, parent_term columns for GO libraries.
-    # Non-GO libraries (REACTOME, KEGG, HALLMARK) get null values.
+    # Adds cluster_status, cluster_id, is_representative, parent_term. Non-GO
+    # libraries (REACTOME, KEGG, HALLMARK) are 'not_go_library' and, like every
+    # unclustered term, their own representative (spec Section 4.13).
     logging.info("Running GO term redundancy reduction (rrvgo)...")
     enrichment_results = cluster_go_terms(enrichment_results)
 

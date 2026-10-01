@@ -67,8 +67,19 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'bin'))
 
 from enrichment import (
+    CLUSTER_STATUS_CLUSTERED,
+    CLUSTER_STATUS_GROUP_ERROR,
+    CLUSTER_STATUS_NO_DIRECTION,
+    CLUSTER_STATUS_NOT_GO,
+    CLUSTER_STATUS_RRVGO_DROPPED,
+    CLUSTER_STATUS_TOO_FEW,
+    CLUSTER_STATUS_UNAVAILABLE,
+    CLUSTER_STATUS_UNRESOLVED,
     GMT_VERSION_UNKNOWN,
     GseapyResultSchemaError,
+    _annotate_cluster_unit,
+    _clustering_summary_lines,
+    _clustering_units,
     _file_sha256,
     _gmt_version,
     _library_short_name,
@@ -81,6 +92,7 @@ from enrichment import (
     gsea_axis_label,
     gsea_direction_statement,
     prepare_gene_symbols,
+    warn_unclustered_go_groups,
     write_summary,
 )
 
@@ -253,42 +265,264 @@ class TestStringHelpers:
 
 
 # ============================================================
-# Section 6: cluster_go_terms -- graceful degradation (no rpy2)
+# Section 6: cluster_go_terms -- contract without R (degradation paths)
 # ============================================================
-# The real rrvgo clustering (needs R) is not run here. These cover the fallbacks:
-# the three cluster columns are added and left null, and input rows preserved.
-# Empty / non-GO inputs return before the rpy2 import; the GO-library case blocks
-# rpy2 so the lazy `import rpy2.robjects` fails cleanly instead of starting R.
+# The real rrvgo clustering (needs R) is not run here. Empty / non-GO inputs
+# return before the rpy2 import; the GO-library case blocks rpy2 so the lazy
+# `import rpy2.robjects` fails cleanly instead of starting R. Every path must
+# leave cluster_status set and is_representative non-null (True when unclustered).
 
 class TestClusterGoTermsDegradation:
 
-    def test_empty_input_gets_null_columns(self):
+    def test_empty_input_gets_contract_columns(self):
         out = cluster_go_terms(pd.DataFrame(columns=['library', 'term_id']))
-        for col in ('cluster_id', 'is_representative', 'parent_term'):
+        for col in ('cluster_status', 'cluster_id', 'is_representative', 'parent_term'):
             assert col in out.columns
         assert out.empty
 
-    def test_non_go_library_skips_with_null_columns(self):
+    def test_non_go_library_is_its_own_representative(self):
         enr = pd.DataFrame({'library': ['REACTOME', 'REACTOME'],
                             'term_id': ['R1', 'R2'], 'adj_pvalue': [0.01, 0.02]})
         out = cluster_go_terms(enr)
         assert len(out) == 2                                  # rows preserved
+        assert (out['cluster_status'] == CLUSTER_STATUS_NOT_GO).all()
+        assert out['is_representative'].notna().all() and out['is_representative'].all()
         assert out['cluster_id'].isna().all()
         assert out['parent_term'].isna().all()
 
-    def test_go_library_without_rpy2_returns_null_columns(self, monkeypatch):
+    def test_go_library_without_rpy2_is_unavailable_and_warns(self, monkeypatch, caplog):
         # Block rpy2 for this call so cluster_go_terms' lazy `import rpy2.robjects`
         # raises ImportError (instead of starting embedded R, which would segfault
         # where R is not linked), taking the graceful-degradation path.
         monkeypatch.setitem(sys.modules, 'rpy2', None)
-        enr = pd.DataFrame({'library': ['GO_BP', 'GO_BP'],
-                            'term_id': ['GOBP_A', 'GOBP_B'], 'adj_pvalue': [0.01, 0.02]})
-        out = cluster_go_terms(enr)
-        assert len(out) == 2                                  # input preserved
+        enr = pd.DataFrame({'library': ['GO_BP', 'GO_BP', 'REACTOME'],
+                            'analysis_type': ['ORA'] * 3, 'contrast': ['A_vs_B'] * 3,
+                            'term_id': ['GOBP_A', 'GOBP_B', 'R1'], 'adj_pvalue': [0.01, 0.02, 0.03]})
+        with caplog.at_level('WARNING'):
+            out = cluster_go_terms(enr)
+        assert len(out) == 3                                  # input preserved
+        assert list(out['cluster_status']) == [CLUSTER_STATUS_UNAVAILABLE] * 2 + [CLUSTER_STATUS_NOT_GO]
+        assert out['is_representative'].all()
         assert out['cluster_id'].isna().all()
-        assert out['is_representative'].isna().all()
-        assert out['parent_term'].isna().all()
+        # The failure check fires: zero clusters must be announced, not silent.
+        assert 'produced NO clusters for GO_BP/ORA/A_vs_B' in caplog.text
 
+
+# ============================================================
+# Section 6b: _annotate_cluster_unit (pure-Python clustering core)
+# ============================================================
+# r_out mimics the R block's outputs, so status assignment, representative
+# choice and parent_term are tested without R.
+
+def _unit(term_ids, adj_p, nes=None, overlap=None) -> pd.DataFrame:
+    df = pd.DataFrame({'term_id': term_ids, 'adj_pvalue': adj_p})
+    if nes is not None:
+        df['enrichment_score'] = nes
+    if overlap is not None:
+        df['overlap_size'] = overlap
+    return df
+
+
+def _r_out(stage='ok', resolved=None, sim_go=None, red=None) -> dict:
+    return {'stage': stage, 'error': '', 'resolved': resolved or {},
+            'sim_go': set(sim_go or ()), 'red': red or {}}
+
+
+class TestAnnotateClusterUnit:
+
+    def test_each_status_from_ok_stage(self):
+        unit = _unit(['A', 'B', 'C', 'D', 'E'], [0.01, 0.02, 0.03, 0.04, 0.05], overlap=[5] * 5)
+        r_out = _r_out(
+            resolved={'A': 'GO:1', 'B': 'GO:2', 'C': 'GO:3', 'D': 'GO:4'},   # E unresolved
+            sim_go={'GO:1', 'GO:2', 'GO:3'},                                   # GO:4 dropped by rrvgo
+            red={'GO:1': 1, 'GO:2': 1, 'GO:3': 2},
+        )
+        res = _annotate_cluster_unit(unit, 'ORA', r_out)
+        assert list(res['cluster_status']) == [
+            CLUSTER_STATUS_CLUSTERED, CLUSTER_STATUS_CLUSTERED, CLUSTER_STATUS_CLUSTERED,
+            CLUSTER_STATUS_RRVGO_DROPPED, CLUSTER_STATUS_UNRESOLVED,
+        ]
+        assert res['cluster_local'].tolist()[:3] == [1, 1, 2]
+        assert res['cluster_local'].iloc[3:].isna().all()
+        # A is the cluster-1 representative (lowest p); C is a singleton cluster.
+        assert list(res['is_representative']) == [True, False, True, True, True]
+        assert res.at[1, 'parent_term'] == 'A'
+        assert res['parent_term'].isna().sum() == 4
+
+    @pytest.mark.parametrize(('stage', 'status_a', 'status_b'), [
+        # A: resolved and kept by calculateSimMatrix; B: resolved but dropped by it.
+        ('too_few',       CLUSTER_STATUS_TOO_FEW,     CLUSTER_STATUS_TOO_FEW),
+        ('sim_error',     CLUSTER_STATUS_GROUP_ERROR, CLUSTER_STATUS_GROUP_ERROR),
+        ('sim_too_small', CLUSTER_STATUS_TOO_FEW,     CLUSTER_STATUS_RRVGO_DROPPED),
+        ('reduce_error',  CLUSTER_STATUS_GROUP_ERROR, CLUSTER_STATUS_RRVGO_DROPPED),
+    ])
+    def test_failure_stages(self, stage, status_a, status_b):
+        unit = _unit(['A', 'B', 'C'], [0.01, 0.02, 0.03])            # C unresolved
+        sim_go = {'GO:1'} if stage in ('sim_too_small', 'reduce_error') else set()
+        r_out = _r_out(stage, resolved={'A': 'GO:1', 'B': 'GO:2'}, sim_go=sim_go)
+        res = _annotate_cluster_unit(unit, 'ORA', r_out)
+        assert list(res['cluster_status']) == [status_a, status_b, CLUSTER_STATUS_UNRESOLVED]
+        assert res['is_representative'].all()
+        assert res['cluster_local'].isna().all()
+
+    def test_r_error_marks_whole_unit_group_error(self):
+        res = _annotate_cluster_unit(_unit(['A', 'B'], [0.01, 0.02]), 'ORA', None)
+        assert (res['cluster_status'] == CLUSTER_STATUS_GROUP_ERROR).all()
+        assert res['is_representative'].all()
+
+    @pytest.mark.parametrize(('atype', 'unit', 'expected_rep'), [
+        # Tied adj_pvalue: GSEA breaks the tie on |NES| ...
+        ('GSEA', _unit(['A', 'B', 'C'], [0.0, 0.0, 0.0], nes=[1.5, -2.5, 2.0]), 'B'),
+        # ... ORA on overlap_size ...
+        ('ORA',  _unit(['A', 'B', 'C'], [0.01, 0.01, 0.01], overlap=[3, 9, 9]), 'B'),
+        # ... and full ties fall back to term_id.
+        ('ORA',  _unit(['Z', 'M', 'B'], [0.01, 0.01, 0.01], overlap=[4, 4, 4]), 'B'),
+        # Missing adj_pvalue sorts last.
+        ('ORA',  _unit(['A', 'B'], [np.nan, 0.5], overlap=[9, 1]), 'B'),
+    ])
+    def test_representative_tie_break(self, atype, unit, expected_rep):
+        gos = {t: f'GO:{i}' for i, t in enumerate(unit['term_id'])}
+        r_out = _r_out(resolved=gos, sim_go=gos.values(), red=dict.fromkeys(gos.values(), 7))
+        for ordered in (unit, unit.iloc[::-1]):              # row order must not matter
+            res = _annotate_cluster_unit(ordered, atype, r_out)
+            assert ordered.loc[res['is_representative'], 'term_id'].tolist() == [expected_rep]
+            assert (res.loc[~res['is_representative'], 'parent_term'] == expected_rep).all()
+
+
+class TestClusteringUnits:
+
+    def test_ora_is_one_unit(self):
+        g = pd.DataFrame({'term_id': ['A', 'B'], 'enrichment_score': [np.nan, np.nan]})
+        units, no_dir = _clustering_units(g, 'ORA')
+        assert [lbl for lbl, _ in units] == ['all']
+        assert len(units[0][1]) == 2
+        assert len(no_dir) == 0
+
+    def test_gsea_splits_by_nes_sign(self):
+        g = pd.DataFrame({'term_id': list('ABCDE'),
+                          'enrichment_score': [2.0, -1.5, 0.0, np.nan, 1.1]})
+        units, no_dir = _clustering_units(g, 'GSEA')
+        assert {lbl: set(u['term_id']) for lbl, u in units} == {'NES>0': {'A', 'E'}, 'NES<0': {'B'}}
+        assert set(g.loc[no_dir, 'term_id']) == {'C', 'D'}
+
+
+class TestClusterGoTermsOrchestration:
+    """
+    Drive cluster_go_terms end to end with a fake rpy2 and a stubbed R call, to
+    test GSEA direction splitting, one cluster_id sequence per group, and the
+    no-direction / too-few paths, without R.
+    """
+
+    def _fake_rpy2(self, monkeypatch, red_by_unit):
+        import types
+
+        import enrichment
+        rpy2 = types.ModuleType('rpy2')
+        robjects = types.ModuleType('rpy2.robjects')
+        packages = types.ModuleType('rpy2.robjects.packages')
+        packages.importr = lambda name: None
+        monkeypatch.setitem(sys.modules, 'rpy2', rpy2)
+        monkeypatch.setitem(sys.modules, 'rpy2.robjects', robjects)
+        monkeypatch.setitem(sys.modules, 'rpy2.robjects.packages', packages)
+        calls = []
+
+        def fake_run(ro, unit, ont, orgdb, threshold):
+            # Mimics the R block: names starting with 'X' do not resolve, and
+            # fewer than 2 resolved GO IDs ends at stage 'too_few'.
+            calls.append(list(unit['term_id']))
+            gos = {t: 'GO:' + t for t in unit['term_id'] if not t.startswith('X')}
+            if len(gos) < 2:
+                return _r_out('too_few', resolved=gos)
+            red = {'GO:' + t: c for t, c in red_by_unit(unit).items() if t in gos}
+            return _r_out(resolved=gos, sim_go=gos.values(), red=red)
+
+        monkeypatch.setattr(enrichment, '_run_rrvgo_unit', fake_run)
+        return calls
+
+    def test_gsea_direction_units_and_cluster_numbering(self, monkeypatch):
+        enr = pd.DataFrame({
+            'library': ['GO_BP'] * 6, 'analysis_type': ['GSEA'] * 6, 'contrast': ['A_vs_B'] * 6,
+            'term_id': ['U1', 'U2', 'U3', 'D1', 'D2', 'Z'],
+            'adj_pvalue': [0.01, 0.02, 0.03, 0.01, 0.02, 0.5],
+            'enrichment_score': [2.0, 1.8, 1.2, -2.0, -1.9, 0.0],
+        })
+        # rrvgo numbers clusters from 1 in every unit: up {U1,U2}=1, {U3}=2; down {D1,D2}=1.
+        calls = self._fake_rpy2(
+            monkeypatch, lambda u: {t: (2 if t == 'U3' else 1) for t in u['term_id']})
+        out = cluster_go_terms(enr).set_index('term_id')
+        assert calls == [['U1', 'U2', 'U3'], ['D1', 'D2']]   # Z (NES 0) never reaches R
+        assert out.at['Z', 'cluster_status'] == CLUSTER_STATUS_NO_DIRECTION
+        # Up and down clusters share one sequence: 1, 2 (up), 3 (down). No collision.
+        assert out.loc[['U1', 'U2', 'U3', 'D1', 'D2'], 'cluster_id'].tolist() == [1, 1, 2, 3, 3]
+        assert out.loc[['U2', 'D2'], 'parent_term'].tolist() == ['U1', 'D1']
+        assert out['is_representative'].tolist() == [True, False, True, True, False, True]
+
+    def test_single_term_unit_resolves_name_then_too_few(self, monkeypatch):
+        # Single-row units still go through R so an unresolvable name is reported
+        # as unresolved_name, not hidden behind too_few_terms.
+        # Each down unit holds a single row: D1 (resolvable) in contrast A_vs_B,
+        # X_BAD (unresolvable) in C_vs_D.
+        enr = pd.DataFrame({
+            'library': ['GO_BP'] * 6, 'analysis_type': ['GSEA'] * 6,
+            'contrast': ['A_vs_B'] * 3 + ['C_vs_D'] * 3,
+            'term_id': ['U1', 'U2', 'D1', 'U1', 'U2', 'X_BAD'],
+            'adj_pvalue': [0.01, 0.02, 0.03, 0.01, 0.02, 0.04],
+            'enrichment_score': [2.0, 1.5, -1.0, 2.0, 1.5, -2.0],
+        })
+        self._fake_rpy2(monkeypatch, lambda u: dict.fromkeys(u['term_id'], 1))
+        out = cluster_go_terms(enr)
+        status = dict(zip(out['contrast'] + '/' + out['term_id'], out['cluster_status'], strict=True))
+        assert status['A_vs_B/D1'] == CLUSTER_STATUS_TOO_FEW
+        assert status['C_vs_D/X_BAD'] == CLUSTER_STATUS_UNRESOLVED
+        assert out.loc[out['term_id'].isin(['D1', 'X_BAD']), 'is_representative'].all()
+
+    def test_nan_group_key_still_clustered(self, monkeypatch):
+        # A GO row with a missing contrast must not keep the pre-set
+        # 'clustering_unavailable' status when R ran (groupby dropna=False).
+        enr = pd.DataFrame({
+            'library': ['GO_BP'] * 2, 'analysis_type': ['ORA'] * 2, 'contrast': [np.nan] * 2,
+            'term_id': ['A', 'B'], 'adj_pvalue': [0.01, 0.02],
+        })
+        self._fake_rpy2(monkeypatch, lambda u: dict.fromkeys(u['term_id'], 1))
+        out = cluster_go_terms(enr)
+        assert (out['cluster_status'] == CLUSTER_STATUS_CLUSTERED).all()
+
+
+class TestClusteringSummaryAndWarning:
+
+    def _cdf(self) -> pd.DataFrame:
+        return pd.DataFrame({
+            'library':        ['GO_BP'] * 6 + ['REACTOME'],
+            'analysis_type':  ['ORA'] * 4 + ['GSEA'] * 2 + ['ORA'],
+            'contrast':       ['A_vs_B'] * 7,
+            'cluster_status': [CLUSTER_STATUS_CLUSTERED, CLUSTER_STATUS_CLUSTERED,
+                               CLUSTER_STATUS_UNRESOLVED, CLUSTER_STATUS_RRVGO_DROPPED,
+                               CLUSTER_STATUS_GROUP_ERROR, CLUSTER_STATUS_GROUP_ERROR,
+                               CLUSTER_STATUS_NOT_GO],
+            'cluster_id':     pd.array([1, 1, None, None, None, None, None], dtype='Int64'),
+        })
+
+    def test_summary_counts_all_terms_and_flags_unclustered(self):
+        text = '\n'.join(_clustering_summary_lines(self._cdf()))
+        # All 4 ORA terms counted (the old summary counted only the 2 clustered ones).
+        assert '4 terms: 2 clustered (50.0%) -> 1 clusters; 75.0% names resolved' in text
+        assert 'unresolved_name=1' in text
+        assert 'dropped_by_rrvgo=1' in text
+        assert 'WARNING: no GO_BP GSEA terms were clustered' in text
+        # GSEA rows are group_error: the rate cannot be read from status, so none is printed.
+        assert 'GSEA       2 terms: 0 clustered (0.0%) -> 0 clusters; name resolution rate unavailable' in text
+        assert 'not clustered (not a GO library)' in text
+        assert 'threshold=0.7' in text
+
+    def test_warn_skips_frames_without_group_columns(self):
+        assert warn_unclustered_go_groups(pd.DataFrame({
+            'library': ['GO_BP'], 'cluster_status': [CLUSTER_STATUS_UNAVAILABLE]})) == []
+
+    def test_warn_unclustered_go_groups(self, caplog):
+        with caplog.at_level('WARNING'):
+            groups = warn_unclustered_go_groups(self._cdf())
+        assert groups == [('GO_BP', 'GSEA', 'A_vs_B')]       # ORA had clusters; REACTOME is not GO
+        assert 'NOT collapsed' in caplog.text
 
 
 # ============================================================
