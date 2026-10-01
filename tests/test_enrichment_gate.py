@@ -10,7 +10,8 @@
 #   Permanent empirical-gate tests for Module 05 ENRICHMENT (bin/enrichment.py).
 #   Encodes the APPROVED Piece C review invariants M05-1 .. M05-5, plus gates
 #   M05-6 .. M05-11 added 2026-09-29 (GSEA gene_set_size, KNOWN_ISSUES E-9, and
-#   its follow-ups), as runnable pytest checks.
+#   its follow-ups), and M05-12 added 2026-09-30 (gene_set_version per row,
+#   paired with a negative control), as runnable pytest checks.
 #
 #   Teeth: M05-1 .. M05-5 pair each check with a negative control (a known-bad
 #   input the check must reject). M05-11 pairs its size-range and sort checks
@@ -817,6 +818,101 @@ class TestMainSizeInvariant:
 
 
 # ============================================================
+# M05-12: gene_set_version per row on a populated run (needs gseapy)
+# ============================================================
+
+def _assert_versions_match(res: pd.DataFrame, expected: dict) -> None:
+    '''
+    The property under test: gene_set_version is a string column, never null,
+    and every row carries the release of the GMT its library came from
+    (expected maps library short name -> version token).
+    '''
+    assert str(res['gene_set_version'].dtype) == 'string', res['gene_set_version'].dtype
+    assert res['gene_set_version'].notna().all(), 'null gene_set_version'
+    for (lib, atype), sub in res.groupby(['library', 'analysis_type']):
+        got = set(sub['gene_set_version'])
+        assert got == {expected[lib]}, f'{lib} {atype}: gene_set_version {got} != {expected[lib]}'
+
+
+class TestGeneSetVersionPerRow:
+    '''
+    End to end through main() with two GMTs from different MSigDB releases:
+    every written row, ORA and GSEA, carries its own GMT's release, parsed
+    from the filename. rpy2 is blocked so rrvgo takes its null-column path.
+
+    Negative control: the check rejects the written table with the two
+    libraries' versions swapped (the wrong-GMT assignment it must catch).
+    '''
+
+    _GMTS: ClassVar[dict] = {
+        'GO_BP':    'm5.go.bp.v2026.1.Mm.symbols.gmt',
+        'REACTOME': 'm2.cp.reactome.v2025.1.Mm.symbols.gmt',
+    }
+    _EXPECTED: ClassVar[dict] = {'GO_BP': 'v2026.1.Mm', 'REACTOME': 'v2025.1.Mm'}
+    _N = 60
+
+    def _run_main(self, tmp_path: Path, monkeypatch) -> pd.DataFrame:
+        pytest.importorskip('gseapy')
+        genes = [f'Gm{i:03d}' for i in range(self._N)]
+        t_stat = np.linspace(5.0, -5.0, self._N)
+        pd.DataFrame({
+            'protein_id':       [f'P{i:03d}' for i in range(self._N)],
+            'gene_symbol':      genes,
+            'contrast':         'KO_vs_WT',
+            'significant':      [i < 12 for i in range(self._N)],
+            'log2_fc':          t_stat / 3,
+            'deqms_t':          t_stat,
+            'limma_t':          t_stat,
+            'deqms_pvalue':     np.linspace(1e-6, 0.9, self._N),
+            'limma_pvalue':     np.linspace(1e-6, 0.9, self._N),
+            'deqms_adj_pvalue': np.linspace(1e-4, 0.95, self._N),
+            'limma_adj_pvalue': np.linspace(1e-4, 0.95, self._N),
+        }).to_parquet(tmp_path / 'results.parquet', index=False)
+        gmt_dir = tmp_path / 'gmt'
+        gmt_dir.mkdir()
+        # Distinct term names per library; each set has 10-20 detected genes.
+        for lib, name in self._GMTS.items():
+            (gmt_dir / name).write_text(''.join(
+                f'{lib}_SET{k}\tdesc\t' + '\t'.join(genes[k * 5:k * 5 + 15]) + '\n'
+                for k in range(4)
+            ))
+        (tmp_path / 'params.yml').write_text(yaml.safe_dump({'enrichment': {
+            'gene_set_libraries': [f'gmt/{n}' for n in self._GMTS.values()],
+            'gsea_ranking': 't_statistic', 'run_ora': True, 'run_gsea': True,
+            'fdr_threshold': 0.05, 'min_gene_set_size': 5, 'max_gene_set_size': 30,
+            'plot_top_n': 5, 'plot_top_gsea_traces': 1,
+            'gsea_permutations': 100, 'gsea_seed': 42,
+        }}))
+        outdir = tmp_path / 'out'
+        monkeypatch.setitem(sys.modules, 'rpy2', None)
+        monkeypatch.setitem(sys.modules, 'rpy2.robjects', None)
+        monkeypatch.setattr(sys, 'argv', [
+            'enrichment.py', '--results', str(tmp_path / 'results.parquet'),
+            '--params', str(tmp_path / 'params.yml'), '--run-id', 'VERRUN',
+            '--outdir', str(outdir),
+        ])
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            enrichment.main()
+        return pd.read_parquet(outdir / 'VERRUN.enrichment_results.parquet')
+
+    def test_every_row_carries_its_gmt_release(self, tmp_path, monkeypatch):
+        res = self._run_main(tmp_path, monkeypatch)
+        # Both libraries and both analyses must be present for the check to bite.
+        assert set(res['library']) == set(self._GMTS)
+        assert set(res['analysis_type']) == {'ORA', 'GSEA'}
+        _assert_versions_match(res, self._EXPECTED)
+
+    def test_negative_control_swapped_versions_are_caught(self, tmp_path, monkeypatch):
+        res = self._run_main(tmp_path, monkeypatch)
+        swapped = res.copy()
+        swapped['gene_set_version'] = swapped['library'].map(
+            {'GO_BP': 'v2025.1.Mm', 'REACTOME': 'v2026.1.Mm'}).astype('string')
+        with pytest.raises(AssertionError, match='gene_set_version'):
+            _assert_versions_match(swapped, self._EXPECTED)
+
+
+# ============================================================
 # M05-3: in_significant_set decoupling (negative-control, local)
 # ============================================================
 
@@ -1033,6 +1129,8 @@ class TestEmptyRunOutputs:
         # The enrichment results table is genuinely empty (zero terms) yet typed.
         res = pd.read_parquet(outdir / f'{run_id}.enrichment_results.parquet')
         assert len(res) == 0
+        # Same gene_set_version dtype as a populated run (stable Parquet schema).
+        assert str(res['gene_set_version'].dtype) == 'string'
 
     def test_negative_control_missing_output_is_caught(self, tmp_path):
         '''

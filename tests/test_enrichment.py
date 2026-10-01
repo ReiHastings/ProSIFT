@@ -673,6 +673,41 @@ class TestLoadParamsStagedLibraries:
             load_params(self._params(tmp_path, ['a.gmt', 'b.gmt']),
                         staged_libraries=[str(b), str(a)])
 
+    def test_padded_entry_matches_staged_file(self, tmp_path):
+        # workflows/prosift.nf trims each entry before staging; load_params must
+        # compare against the trimmed name too, or a quoted ' a.gmt ' exits.
+        from enrichment import load_params
+        a = self._gmt(tmp_path / 'gmt' / '1', 'a.gmt')
+        enr = load_params(self._params(tmp_path, [' a.gmt ']),
+                          staged_libraries=[str(a)])['enrichment']
+        assert enr['gene_set_libraries'] == [str(a.absolute())]
+
+    def test_padded_entry_resolves_standalone(self, tmp_path):
+        from enrichment import load_params
+        gmt = self._gmt(tmp_path, 'a.gmt')
+        enr = load_params(self._params(tmp_path, ['  a.gmt\t']))['enrichment']
+        assert enr['gene_set_libraries'] == [str(gmt.resolve())]
+
+    @pytest.mark.parametrize('blank', ['', '   ', '\t'])
+    def test_blank_entry_exits(self, tmp_path, blank):
+        # A blank entry trims to '' and resolves to the params directory itself;
+        # it must fail as 'not a file', not reach gseapy.
+        from enrichment import load_params
+        with pytest.raises(SystemExit):
+            load_params(self._params(tmp_path, [blank]))
+
+    def test_trim_matches_java_string_trim(self, tmp_path):
+        # Parity with Groovy trim() in workflows/prosift.nf: chars <= U+0020
+        # (incl. control chars) are stripped, Unicode whitespace (NBSP) is not.
+        from enrichment import _java_trim, load_params
+        assert _java_trim('\x01 a.gmt\r\n') == 'a.gmt'
+        assert _java_trim('\u00a0a.gmt') == '\u00a0a.gmt'
+        gmt = self._gmt(tmp_path, 'a.gmt')
+        enr = load_params(self._params(tmp_path, ['\x01a.gmt']))['enrichment']
+        assert enr['gene_set_libraries'] == [str(gmt.resolve())]
+        with pytest.raises(SystemExit):   # NBSP kept -> '\u00a0a.gmt' does not exist
+            load_params(self._params(tmp_path, ['\u00a0a.gmt']))
+
     def test_staged_missing_file_exits(self, tmp_path):
         from enrichment import load_params
         with pytest.raises(SystemExit):
@@ -806,15 +841,26 @@ class TestWriteSummaryProvenance:
                       {}, pd.DataFrame(), '2026-09-29 00:00:00')
         return (tmp_path / 'RUN.enrichment_summary.txt').read_text(), gmt
 
+    @staticmethod
+    def _library_fields(text, gmt_name) -> list:
+        '''Whitespace fields of the library line: [library, version, filename, ...].'''
+        line = next(ln for ln in text.splitlines()
+                    if gmt_name in ln and not ln.strip().startswith('sha256:'))
+        return line.split()
+
     def test_records_version_and_checksum(self, tmp_path):
+        # Read the Version column itself: the token also appears inside the
+        # filename column, so a whole-text search passes even with no Version
+        # column (it did on the pre-change summary).
         text, gmt = self._write(tmp_path)
-        assert 'v2026.1.Mm' in text
+        fields = self._library_fields(text, gmt.name)
+        assert fields[:3] == ['GO_BP', 'v2026.1.Mm', gmt.name]
         assert f'sha256: {_file_sha256(str(gmt))}' in text
 
     def test_custom_gmt_records_unknown_version(self, tmp_path):
         text, _ = self._write(tmp_path, gmt_name='example_gene_sets.gmt')
-        lib_line = next(line for line in text.splitlines() if 'example_gene_sets.gmt' in line)
-        assert GMT_VERSION_UNKNOWN in lib_line
+        fields = self._library_fields(text, 'example_gene_sets.gmt')
+        assert fields[1] == GMT_VERSION_UNKNOWN
 
     def test_discloses_per_library_fdr_scope(self, tmp_path):
         text, _ = self._write(tmp_path)
@@ -829,3 +875,48 @@ class TestWriteSummaryProvenance:
         gsea_line = next(line for line in text.splitlines() if line.startswith('Correction (GSEA)'))
         assert 'Benjamini' not in gsea_line and 'permutation' in gsea_line
         assert 'Benjamini-Hochberg, per-library' not in text
+
+
+class TestDuplicateLibraryNames:
+    '''
+    main() refuses two GMTs that map to the same library short name (e.g. two
+    GO_BP releases): per-library outputs are keyed by that name, so the second
+    library would silently overwrite the first's GSEA results and plots.
+    '''
+
+    def _run(self, tmp_path, monkeypatch, gmt_rel_paths):
+        import sys
+
+        import enrichment
+        import yaml
+        for rel in gmt_rel_paths:
+            gmt = tmp_path / rel
+            gmt.parent.mkdir(parents=True, exist_ok=True)
+            gmt.write_text('TERM\tdesc\tGeneA\tGeneB\n')
+        pd.DataFrame({
+            'protein_id': ['P1', 'P2'], 'gene_symbol': ['GeneA', 'GeneB'],
+            'contrast': ['KO_vs_WT'] * 2, 'significant': [False, False],
+            'log2_fc': [0.1, -0.1], 'limma_t': [0.5, -0.5],
+            'limma_pvalue': [0.6, 0.7], 'limma_adj_pvalue': [0.8, 0.8],
+        }).to_parquet(tmp_path / 'da.parquet', index=False)
+        (tmp_path / 'params.yml').write_text(yaml.safe_dump(
+            {'enrichment': {'gene_set_libraries': list(gmt_rel_paths), 'run_gsea': False}}))
+        monkeypatch.setattr(sys, 'argv', [
+            'enrichment.py', '--results', str(tmp_path / 'da.parquet'),
+            '--params', str(tmp_path / 'params.yml'), '--run-id', 'DUP',
+            '--outdir', str(tmp_path / 'out'),
+        ])
+        enrichment.main()
+
+    def test_two_releases_of_one_collection_exit(self, tmp_path, monkeypatch):
+        with pytest.raises(SystemExit):
+            self._run(tmp_path, monkeypatch, [
+                'a/m5.go.bp.v2025.1.Mm.symbols.gmt', 'b/m5.go.bp.v2026.1.Mm.symbols.gmt'])
+        assert not (tmp_path / 'out' / 'DUP.enrichment_results.parquet').exists()
+
+    def test_distinct_names_run(self, tmp_path, monkeypatch):
+        # Counterpart: distinct short names are accepted (no significant genes,
+        # so ORA auto-skips and the run writes an empty table).
+        self._run(tmp_path, monkeypatch, [
+            'a/m5.go.bp.v2026.1.Mm.symbols.gmt', 'b/m2.cp.reactome.v2026.1.Mm.symbols.gmt'])
+        assert (tmp_path / 'out' / 'DUP.enrichment_results.parquet').exists()

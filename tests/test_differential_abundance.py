@@ -40,8 +40,10 @@
 #
 #   copy/paste: pytest tests/test_differential_abundance.py -v
 
+import re
 import sys
 from pathlib import Path
+from typing import ClassVar
 
 import numpy as np
 import pandas as pd
@@ -620,9 +622,27 @@ class TestBhPinnedInRSource:
     _SRC = (Path(__file__).resolve().parent.parent / 'bin'
             / 'differential_abundance.py').read_text()
 
+    # Anchored at line start (optional indent only), so a commented-out line
+    # ('# res <- ...') does not satisfy the check.
+    _TOPTABLE = re.compile(
+        r'^[ \t]*res\s*<-\s*limma::topTable\([^)]*adjust\.method\s*=\s*"BH"', re.MULTILINE)
+    _PADJUST: ClassVar[dict] = {
+        col: re.compile(rf'^[ \t]*res\${re.escape(col)}\s*<-\s*stats::p\.adjust\('
+                        rf'res\${re.escape(src)},\s*method\s*=\s*"BH"\)', re.MULTILINE)
+        for col, src in (('adj.P.Val', 'P.Value'), ('sca.adj.pval', 'sca.P.Value'))
+    }
+
     def test_toptable_pins_bh(self):
-        assert 'adjust.method = "BH"' in self._SRC
+        assert self._TOPTABLE.search(self._SRC)
 
     def test_deqms_columns_recomputed_with_bh(self):
-        assert 'res$adj.P.Val    <- stats::p.adjust(res$P.Value,     method = "BH")' in self._SRC
-        assert 'res$sca.adj.pval <- stats::p.adjust(res$sca.P.Value, method = "BH")' in self._SRC
+        for col, pattern in self._PADJUST.items():
+            assert pattern.search(self._SRC), col
+
+    def test_negative_control_commented_out_lines_fail(self):
+        # Teeth: the same source with the pinned lines commented out must not match.
+        commented = re.sub(r'^([ \t]*)(res(?:\$\S+)?\s*<-\s*(?:limma::topTable|stats::p\.adjust))',
+                           r'\1# \2', self._SRC, flags=re.MULTILINE)
+        assert commented != self._SRC
+        assert not self._TOPTABLE.search(commented)
+        assert not any(p.search(commented) for p in self._PADJUST.values())
