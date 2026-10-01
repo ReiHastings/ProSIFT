@@ -170,7 +170,7 @@ ProSIFT/
 
 ## Tools and Libraries
 
-Nextflow (DSL2, pbspro and local executors), Python 3.12, pandas, numpy, pyarrow (Parquet intermediates), pyyaml, requests, tqdm, scipy, scikit-learn (KNNImputer, IterativeImputer), gseapy (enrich, prerank), rpy2, R 4.3 with Bioconductor limma, DEqMS, rrvgo, GOSemSim, GO.db, org.Mm.eg.db, matplotlib, seaborn, plotly, python-kaleido (static PNG export), pytest, Ensembl BioMart (XML REST), UniProt REST (/uniprotkb/search, /idmapping), NCBI E-utilities (ESearch), DisGeNET REST, DGIdb GraphQL v5.0, CTD bulk TSV, MSigDB GMT libraries, conda, Singularity/Apptainer.
+Nextflow (DSL2, pbs (Torque) and local executors), Python 3.12, pandas, numpy, pyarrow (Parquet intermediates), pyyaml, requests, tqdm, scipy, scikit-learn (KNNImputer, IterativeImputer), gseapy (enrich, prerank), rpy2, R 4.3 with Bioconductor limma, DEqMS, rrvgo, GOSemSim, GO.db, org.Mm.eg.db, matplotlib, seaborn, plotly, python-kaleido (static PNG export), pytest, Ensembl BioMart (XML REST), UniProt REST (/uniprotkb/search, /idmapping), NCBI E-utilities (ESearch), DisGeNET REST, DGIdb GraphQL v5.0, CTD bulk TSV, MSigDB GMT libraries, conda, Singularity/Apptainer.
 
 ## Author
 
