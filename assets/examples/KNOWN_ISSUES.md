@@ -75,6 +75,29 @@ staged under `gmt/1/`), a Nextflow render check of the real process script
 end-to-end `enrichment.py` run in a simulated task directory. Not yet verified
 by a full non-stub run: the example still stops at Module 01 (E-1).
 
+Behaviour change: a missing or empty `gene_set_libraries`, or a missing GMT, now
+stops the whole run when the input channel is built (every samplesheet row),
+not only that run's ENRICHMENT task after Modules 01-04. Follow-up hardening
+(2026-09-30 and 2026-10-01, after two fresh code reviews):
+- Input paths containing glob characters (`[ ] * ? { }`) are rejected with a
+  clear error before any task is staged. This covers the samplesheet itself,
+  its entries, and GMT entries. Every row and GMT is validated in the workflow
+  body before the input channel is built (2026-10-01; previously the checks
+  ran per row alongside task dispatch, so on a long samplesheet tasks could
+  start before a bad later row was reached). They are not supported: staged
+  inputs are linked with an unquoted `ln -s`, so a bracket name could match a
+  sibling such as `x1.gmt`. That re-glob is inferred from the unquoted
+  command; it was not reproduced directly, because the rejection now
+  prevents the case.
+- Because `?` is a glob character, a URL entry with a query string (for
+  example a presigned S3 or https link) is also rejected. Supporting such URLs
+  needs a check of how Nextflow names and stages downloaded files first.
+- Entries are trimmed identically in the workflow and in `enrichment.py`
+  (Java `String.trim()` rule: chars <= U+0020).
+- A blank entry fails as "not a file".
+- Two GMTs that map to the same library short name are rejected when
+  ENRICHMENT starts. This check runs inside the task, not at startup.
+
 Original finding: `assets/examples/minimal/params.yml` wrote the GMT path as
 `/Users/reina/Library/Mobile Documents/.../example_gene_sets.gmt`.
 `bin/enrichment.py:145-151` calls `sys.exit(1)` when the library is missing, so
@@ -268,8 +291,10 @@ channels built but never consumed.
 
 ### E-18. Minor
 
-- `openpyxl` is imported by `generate_examples.py` but declared in neither
-  `environment.yml` nor `pyproject.toml`.
+- ~~`openpyxl` is imported by `generate_examples.py` but declared in neither
+  `environment.yml` nor `pyproject.toml`.~~ Resolved 2026-10-01: declared in
+  `environment.yml` (the runtime manifest; `pyproject.toml` lists no runtime
+  dependencies).
 - `params.yml` comment claims `knn_k` "must be < the number of samples". False:
   `bin/impute.py:340-369` runs `KNNImputer` over proteins, so `k=3` means three
   neighbouring proteins of 40. The stated constraint does not exist.

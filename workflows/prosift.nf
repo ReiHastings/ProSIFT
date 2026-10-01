@@ -39,10 +39,12 @@ include { RESULTS_ASSEMBLY       } from '../modules/local/results_assembly/main'
 workflow PROSIFT {
 
     // --- Build per-run input channel from samplesheet ---
-    // Each emission: [meta, abundance_matrix, metadata, params_yml]
+    // Each run tuple: [meta, abundance_matrix, metadata, params_yml, gmts], where
+    // gmts is the list of resolved GMT files for ENRICHMENT; multiMap below
+    // splits it into per-process branches.
     // meta is a Map; run_id is the only key used by Module 01.
     //
-    // ch_input is a queue channel (from Channel.fromPath) and can only be
+    // ch_input is a queue channel (from Channel.fromList) and can only be
     // consumed once per branch. multiMap is required here. Process output
     // channels (VALIDATE_INPUTS.out.*, FILTER_PROTEINS.out.*) are broadcast
     // in DSL2 and do not need multiMap even with multiple downstream subscribers.
@@ -61,6 +63,17 @@ workflow PROSIFT {
     // from any launch directory), and it removes the need for machine-specific
     // absolute paths that break the moment the inputs move or are rsynced to the
     // cluster.
+    // Glob characters in input paths are rejected, not supported. file()
+    // globs by default, and even with glob: false Nextflow re-globs each input
+    // when it stages it into a task (an unquoted `ln -s` in .command.run), so
+    // `x[1].gmt` next to `x1.gmt` would silently stage the wrong file.
+    def reject_glob_chars = { String path, String what ->
+        if( path =~ /[\[\]*?{}]/ )
+            error "${what}: path contains a glob character ([ ] * ? { }), which ProSIFT " +
+                  "does not support in input paths: '${path}'. Rename the file or directory."
+    }
+    reject_glob_chars(params.samplesheet.toString(), 'Samplesheet')
+
     def sheet_dir = file(params.samplesheet).toAbsolutePath().parent
 
     def resolve_input = { String raw, String field, String run_id ->
@@ -69,9 +82,11 @@ workflow PROSIFT {
         def p = raw.trim()
         // file() on an absolute path returns it unchanged; a relative path is
         // rebased onto the samplesheet directory before existence checking.
+        reject_glob_chars(p, "Samplesheet row '${run_id}' '${field}'")
         def resolved = p.startsWith('/') ? file(p) : file(sheet_dir.resolve(p))
-        if( !resolved.exists() )
-            error "Samplesheet row '${run_id}': '${field}' not found at ${resolved}\n" +
+        reject_glob_chars(resolved.toString(), "Samplesheet row '${run_id}' '${field}'")
+        if( !resolved.exists() || resolved.isDirectory() )
+            error "Samplesheet row '${run_id}': '${field}' not found (or not a file) at ${resolved}\n" +
                   "  (samplesheet value: '${p}'; relative paths resolve against ${sheet_dir})"
         return resolved
     }
@@ -91,27 +106,43 @@ workflow PROSIFT {
             error "Run '${run_id}': enrichment.gene_set_libraries in ${params_yml} is missing or empty."
         def params_dir = params_yml.toAbsolutePath().parent
         return libs.collect { raw ->
+            // Groovy trim() removes leading/trailing chars <= U+0020;
+            // enrichment.py load_params applies the same rule.
             def p = raw.toString().trim()
-            // URLs (s3://, https://) and absolute paths are used as given.
+            // URLs (s3://, https://) and absolute paths are used as given,
+            // except that a URL with a query string ('?') is rejected by the
+            // glob check (unsupported; see KNOWN_ISSUES E-4).
+            reject_glob_chars(p, "Run '${run_id}' gene set library")
             def gmt = ( p.contains('://') || new File(p).isAbsolute() ) ? file(p) : file(params_dir.resolve(p))
-            if( !gmt.exists() )
-                error "Run '${run_id}': gene set library not found at ${gmt}\n" +
+            reject_glob_chars(gmt.toString(), "Run '${run_id}' gene set library")
+            // A blank entry resolves to the params directory itself: not a file.
+            if( !gmt.exists() || gmt.isDirectory() )
+                error "Run '${run_id}': gene set library not found (or not a file) at ${gmt}\n" +
                       "  (params.yml value: '${p}'; relative paths resolve against ${params_dir})"
             return gmt
         }
     }
 
+    // --- Resolve and validate every run eagerly ---
+    // All rows and their GMT libraries are resolved and checked here, in the
+    // workflow body, before any channel exists. With lazy channel operators
+    // (.map/.multiMap) the checks ran alongside task dispatch, so on a long
+    // samplesheet tasks for earlier rows could be submitted (PBS jobs) before
+    // a bad later row stopped the run.
+    def sheet_file = file(params.samplesheet)
+    if( !sheet_file.exists() )
+        error "Samplesheet not found: ${params.samplesheet}"
+    def runs = sheet_file.splitCsv(header: true).collect { row ->
+        def meta       = [run_id: row.run_id]
+        def abund      = resolve_input(row.abundance, 'abundance', row.run_id)
+        def meta_csv   = resolve_input(row.metadata,  'metadata',  row.run_id)
+        def params_yml = resolve_input(row.params,    'params',    row.run_id)
+        [ meta, abund, meta_csv, params_yml, resolve_gmts(params_yml, row.run_id) ]
+    }
+
     Channel
-        .fromPath(params.samplesheet, checkIfExists: true)
-        .splitCsv(header: true)
-        .map { row ->
-            def meta = [run_id: row.run_id]
-            [ meta,
-              resolve_input(row.abundance, 'abundance', row.run_id),
-              resolve_input(row.metadata,  'metadata',  row.run_id),
-              resolve_input(row.params,    'params',    row.run_id) ]
-        }
-        .multiMap { meta, abund, meta_csv, params_yml ->
+        .fromList(runs)
+        .multiMap { meta, abund, meta_csv, params_yml, gmts ->
             // validate branch: all four inputs for VALIDATE_INPUTS
             validate:         [ meta, abund, meta_csv, params_yml ]
             // filter_params: params_yml for the FILTER_PROTEINS join
@@ -129,7 +160,7 @@ workflow PROSIFT {
             // da_params: params_yml for the DIFFERENTIAL_ABUNDANCE join
             da_params:        [ meta, params_yml ]
             // enrich_params: params_yml + resolved GMT files for the ENRICHMENT join
-            enrich_params:    [ meta, params_yml, resolve_gmts(params_yml, meta.run_id) ]
+            enrich_params:    [ meta, params_yml, gmts ]
             // Module 06: one branch per database process
             db_uniprot_params:  [ meta, params_yml ]
             db_pubmed_params:   [ meta, params_yml ]

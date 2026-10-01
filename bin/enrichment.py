@@ -147,6 +147,16 @@ def _gmt_version(gmt_path: str) -> str:
     return match.group(1) if match else GMT_VERSION_UNKNOWN
 
 
+def _java_trim(s: str) -> str:
+    """Strip leading/trailing chars <= U+0020, matching Java/Groovy String.trim()."""
+    start, end = 0, len(s)
+    while start < end and s[start] <= " ":
+        start += 1
+    while end > start and s[end - 1] <= " ":
+        end -= 1
+    return s[start:end]
+
+
 def _file_sha256(path: str) -> str:
     """Hex SHA-256 of a file, read in chunks (GMT files can be tens of MB)."""
     digest = hashlib.sha256()
@@ -187,6 +197,11 @@ def load_params(params_path: str, staged_libraries: list[str] | None = None) -> 
         logging.error("params.yml: enrichment.gene_set_libraries is empty or missing. "
                       "Provide at least one GMT file path.")
         sys.exit(1)
+    # Trim each entry exactly as workflows/prosift.nf (resolve_gmts) does with
+    # Groovy/Java String.trim(): strip leading/trailing chars <= U+0020 (ASCII
+    # whitespace and control chars), not Unicode whitespace such as NBSP. Both
+    # sides then accept or reject the same entries.
+    libraries = [_java_trim(str(p)) for p in libraries]
     resolved = []
     if staged_libraries is not None:
         # Nextflow path: the workflow read this same list and staged each file
@@ -204,15 +219,17 @@ def load_params(params_path: str, staged_libraries: list[str] | None = None) -> 
                 logging.error("Staged GMT '%s' does not match params.yml entry '%s' "
                               "(filenames differ; order must match).", staged_p.name, entry)
                 sys.exit(1)
-            if not staged_p.exists():
-                logging.error("Staged gene set library not found: %s", staged_p)
+            if not staged_p.is_file():
+                logging.error("Staged gene set library not found (or not a file): %s", staged_p)
                 sys.exit(1)
             resolved.append(str(staged_p))
     else:
         for p in libraries:
             resolved_p = Path(p) if Path(p).is_absolute() else (params_dir / p).resolve()
-            if not resolved_p.exists():
-                logging.error("Gene set library not found: %s (resolved from %s)", resolved_p, p)
+            # is_file(): a blank entry resolves to the params directory itself.
+            if not resolved_p.is_file():
+                logging.error("Gene set library not found (or not a file): %s (resolved from %r)",
+                              resolved_p, p)
                 sys.exit(1)
             resolved.append(str(resolved_p))
     enr["gene_set_libraries"] = resolved
@@ -1549,6 +1566,18 @@ def main() -> None:
     gmt_paths    = enr["gene_set_libraries"]
     library_names = [_library_short_name(p) for p in gmt_paths]
     logging.info("Libraries: %s", library_names)
+    # Library short names key every per-library output (results rows, plot
+    # filenames, the GSEA results used for running-score plots and the
+    # protein-term mapping). Two GMTs with the same short name (e.g. two GO_BP
+    # releases) would silently overwrite each other, so refuse them.
+    duplicates = sorted({n for n in library_names if library_names.count(n) > 1})
+    if duplicates:
+        logging.error("Duplicate gene set library short name(s) %s from %s. Each GMT "
+                      "must map to a distinct library name: run different releases of "
+                      "the same collection as separate runs, or rename custom GMTs whose "
+                      "names differ only after the first 20 characters.",
+                      duplicates, gmt_paths)
+        sys.exit(1)
 
     # --- Per-contrast enrichment ---
     all_enrichment: list[pd.DataFrame] = []
@@ -1636,7 +1665,6 @@ def main() -> None:
         # Enforce schema dtypes
         enrichment_results["gene_set_size"] = enrichment_results["gene_set_size"].astype("Int64")
         enrichment_results["overlap_size"]  = enrichment_results["overlap_size"].astype("Int64")
-        enrichment_results["gene_set_version"] = enrichment_results["gene_set_version"].astype("string")
     else:
         logging.warning("No enrichment results produced for any contrast or library.")
         enrichment_results = pd.DataFrame(columns=[
@@ -1645,6 +1673,9 @@ def main() -> None:
             "combined_score", "gene_set_size", "overlap_size", "overlap_genes",
             "gene_set_version", "cluster_id", "is_representative", "parent_term",
         ])
+    # Same gene_set_version dtype on the empty and populated paths (other
+    # columns in an empty table are still untyped in Parquet; pre-existing).
+    enrichment_results["gene_set_version"] = enrichment_results["gene_set_version"].astype("string")
 
     # --- GO-term redundancy reduction (rrvgo via rpy2) ---
     # Adds cluster_id, is_representative, parent_term columns for GO libraries.
