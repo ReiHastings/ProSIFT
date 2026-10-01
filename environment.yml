@@ -15,6 +15,7 @@ dependencies:
   - numpy>=1.26,<2
   - pyarrow                           # Parquet intermediates
   - pyyaml
+  - openpyxl                          # .xlsx input template written by assets/examples/generate_examples.py
 
   # --- HTTP / API (Phase 1 UniProt mapping, Phase 3 databases) ---
   # requests also drives BioMart ortholog mapping (Phase 3, Module 01 Layer 2)
